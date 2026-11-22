@@ -13,6 +13,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field, fields
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from agent.agent_runtime_helpers_placeholders import hidden_interrupt_placeholder_row
@@ -44,7 +45,7 @@ from agent.turn_api_call import handle_api_interrupt, nous_rate_limit_guard, per
 from agent.turn_api_error import handle_api_error
 from agent.turn_api_request import build_api_request
 from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, OPEN_TURN_TAIL_ROLES, failed_turn_notice, site_copy
-from agent.turn_final_response import finish_text_response
+from agent.turn_final_response import finish_text_response, resume_silent_redirect
 from agent.turn_finalizer import finalize_turn
 from agent.turn_iteration_prep import (
     announce_api_call,
@@ -1487,6 +1488,7 @@ class _LoopState:
     final_response: Any = None
     interrupted: bool = False
     failed: bool = False
+    _redirect_resume_pending: bool = False
     codex_ack_continuations: int = 0
     length_continue_retries: int = 0
     # Backstop for the refunding restarts (redirect / rebuilt-for-fallback). Unlike
@@ -1757,9 +1759,7 @@ def _run_conversation_turn(
                 return _ri.result
             if _ri.action == "continue":
                 continue
-            _v = _run_phase(
-                run_tool_round if s.assistant_message.tool_calls else finish_text_response, agent, s
-            )
+            _v = _finish_iteration(agent, s)
             if _v.action == "return":
                 return _v.result
             if _v.action == "break":
@@ -1780,6 +1780,14 @@ def _run_conversation_turn(
         # future input can move to a clean session (#98722).
         result.update(error=_COMPRESSION_TIMEOUT_FINAL_RESPONSE, partial=True, compression_exhausted=True)
     return result
+
+
+def _finish_iteration(agent, state: _LoopState):
+    if state.assistant_message.tool_calls:
+        return _run_phase(run_tool_round, agent, state)
+    if resume_silent_redirect(agent, state):
+        return SimpleNamespace(action="continue")
+    return _run_phase(finish_text_response, agent, state)
 
 
 def run_conversation(

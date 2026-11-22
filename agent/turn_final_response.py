@@ -18,6 +18,7 @@ from agent.turn_failure_copy import stamp_failure
 from agent.turn_empty_response import recover_empty_response
 from agent.turn_stop_gates import apply_stop_gates
 from agent.turn_truncation import partial_result, repetition_copy
+from gateway.response_filters import is_intentional_silence_response
 
 _REPETITION_STOPPED = repetition_copy(
     "before delivery",
@@ -51,6 +52,26 @@ class FinalResponseVerdict:
     _pending_verification_response_previewed: Any
     api_call_count: int
     result: Optional[dict[str, Any]] = None
+
+
+def resume_silent_redirect(agent, state) -> bool:
+    if (
+        not state._redirect_resume_pending or state.finish_reason != "stop"
+        or not is_intentional_silence_response(state.assistant_message.content)
+        or agent._interrupt_requested
+    ):
+        return False
+    state._redirect_resume_pending = False
+    state.final_response = None
+    append_message(state.messages, {
+        "role": "assistant", "content": "",
+        "api_content": "No answer was needed for the follow-up.", "display_kind": "hidden",
+    })
+    append_message(state.messages, {
+        "role": "user", "content": "",
+        "api_content": "Continue the original task from the progress already made.", "display_kind": "hidden",
+    })
+    return True
 
 
 def finish_text_response(

@@ -20,6 +20,7 @@ from contextlib import suppress
 from pathlib import Path
 
 from agent.i18n import t
+from gateway.busy_interjection import route_busy_interjection
 from gateway.busy_media import prepare_redirect_text
 from gateway.config import Platform
 from gateway.platforms.base import EphemeralReply
@@ -700,12 +701,27 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
     ) -> None:
         """Redirect corrections with their attachment context when supported."""
         from gateway.run import _build_media_placeholder
+        interjection = await route_busy_interjection(self, event, _quick_key, running_agent)
+        if interjection == "handled":
+            return
+        if interjection == "queue":
+            self._queue_or_replace_pending_event(_quick_key, event)
+            return
         _can_redirect = getattr(running_agent, "_supports_active_turn_redirect", False) is True
         if event.message_type != MessageType.COMMAND and _can_redirect and hasattr(running_agent, "redirect"):
             text = await prepare_redirect_text(self, event)
+            if interjection == "apply":
+                text = self._busy_followup_text(text)
             if self._redirect_active_turn(running_agent, text, _quick_key, event):
                 logger.debug("PRIORITY redirect for session %s", _quick_key)
+                if interjection == "apply" and (adapter := self._delivery_adapter_for(source)):
+                    state = self._peek_session_state(_quick_key)
+                    outcome = self._BusySteerOutcome("interrupt", False, False, False, True)
+                    await self._busy_interrupt_and_ack(event, _quick_key, adapter, state, running_agent, outcome)
                 return
+        if interjection == "apply":
+            self._queue_or_replace_pending_event(_quick_key, event)
+            return
         logger.debug("PRIORITY interrupt for session %s", _quick_key)
         _interrupt_text = event.text
         if self._pending_event_audio_paths(event):
@@ -722,8 +738,8 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
     async def _hm_busy_preempt(self, event: MessageEvent, source: SessionSource, _quick_key: str) -> bool:
         """busy_input_mode for a follow-up the durable FIFO is about to admit, through main's own busy
         resolution (voice transcribed into steer/interrupt, steer folded into the turn, busy ack).
-        Returns True when the text already landed inside the running turn (steer / redirect), so it
-        must NOT also be admitted as its own turn; False when the caller should admit it (queue mode,
+        Returns True when the message is settled (including steer / redirect), so it must NOT also
+        be admitted as its own turn; False when the caller should admit it (queue mode,
         a demotion, or an interrupt — the ended turn lets the FIFO run the follow-up next)."""
         from gateway.run import _AGENT_PENDING_SENTINEL
         mode = self._effective_busy_input_mode(source)
@@ -735,6 +751,8 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
                     and self._effective_busy_text_mode(source) == "queue")):
             return False
         outcome = await self._resolve_busy_steer_or_redirect(event, _quick_key, mode, running_agent)
+        if outcome is None:
+            return True
         await self._busy_interrupt_and_ack(event, _quick_key, adapter, state, running_agent, outcome)
         return bool(outcome.steered or outcome.redirected)
 
