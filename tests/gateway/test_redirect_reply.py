@@ -43,7 +43,7 @@ def slack_turn():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["question", "correction", "finished", "stop"])
+@pytest.mark.parametrize("case", ["question", "question-with-tool", "correction", "finished", "stop"])
 async def test_standalone_redirect_answer_reaches_slack_before_original_task_finishes(agent, slack_turn, case):
     turn, adapter = slack_turn
     turn._ctx._loop_for_step = asyncio.get_running_loop()
@@ -63,6 +63,7 @@ async def test_standalone_redirect_answer_reaches_slack_before_original_task_fin
 
     adapter.send.side_effect = send
     tool_calls = []
+    answered_before_tool = []
     requests = []
 
     def respond(api_kwargs):
@@ -73,6 +74,11 @@ async def test_standalone_redirect_answer_reaches_slack_before_original_task_fin
             raise InterruptedError("redirect")
         if len(requests) == 2:
             assert followup in messages[-1]["content"]
+            if case == "question-with-tool":
+                tc = test_run_agent._mock_tool_call(
+                    name="web_search", arguments='{"query":"original report"}', call_id="original-tool",
+                )
+                return test_run_agent._mock_response(content=answer, finish_reason="tool_calls", tool_calls=[tc])
             reply = test_run_agent._mock_response(content=answer)
             if case == "question":
                 reply.choices[0].message.codex_message_items = [
@@ -80,7 +86,8 @@ async def test_standalone_redirect_answer_reaches_slack_before_original_task_fin
                      "content": [{"type": "output_text", "text": "Internal working note."}]},
                 ]
             return reply
-        assert answer_sent.wait(timeout=5)
+        if case != "question-with-tool":
+            assert answer_sent.wait(timeout=5)
         assert [row["content"] for row in messages if row["role"] == "assistant"].count(answer) == 1
         if case == "stop":
             agent.hard_interrupt()
@@ -88,7 +95,7 @@ async def test_standalone_redirect_answer_reaches_slack_before_original_task_fin
         if case == "finished":
             assert "[SILENT]" in messages[-1]["content"]
             return test_run_agent._mock_response(content="[SILENT]")
-        if len(requests) == 3:
+        if len(requests) == 3 and case != "question-with-tool":
             args = '{"query":"staging"}' if case == "correction" else '{"query":"original report"}'
             tc = test_run_agent._mock_tool_call(name="web_search", arguments=args, call_id="original-tool")
             return test_run_agent._mock_response(content="Internal working note.", finish_reason="tool_calls", tool_calls=[tc])
@@ -96,6 +103,7 @@ async def test_standalone_redirect_answer_reaches_slack_before_original_task_fin
         return test_run_agent._mock_response(content="Original report completed.")
 
     def execute(_name, arguments, *args, **kwargs):
+        answered_before_tool.append(answer_sent.is_set())
         tool_calls.append(arguments["query"])
         return "original tool result"
 
@@ -118,8 +126,12 @@ async def test_standalone_redirect_answer_reaches_slack_before_original_task_fin
         assert silence
     else:
         assert result["final_response"] == "Original report completed."
-    assert len(requests) == (3 if case in {"finished", "stop"} else 4)
-    assert tool_calls == {"question": ["original report"], "correction": ["staging"]}.get(case, [])
+    assert len(requests) == (3 if case in {"finished", "stop", "question-with-tool"} else 4)
+    assert tool_calls == {
+        "question": ["original report"], "question-with-tool": ["original report"], "correction": ["staging"],
+    }.get(case, [])
+    if case == "question-with-tool":
+        assert answered_before_tool == [True]
 
 
 @pytest.mark.asyncio

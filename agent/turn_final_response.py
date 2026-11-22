@@ -56,9 +56,25 @@ class FinalResponseVerdict:
     result: Optional[dict[str, Any]] = None
 
 
-def consume_redirect_reply(agent, state) -> None:
+def _redirect_reply_pending(agent, state) -> bool:
+    return state._redirect_resume_pending or state._resumed_tool_redirects != getattr(agent, "_delivered_tool_redirects", 0)
+
+
+def consume_redirect_reply(agent, state) -> bool:
+    pending = _redirect_reply_pending(agent, state)
     state._redirect_resume_pending = False
     state._resumed_tool_redirects = getattr(agent, "_delivered_tool_redirects", 0)
+    return pending
+
+
+def deliver_redirect_reply_with_tools(agent, message) -> None:
+    content = flatten_message_text(message.get("content"))
+    visible = agent._strip_think_blocks(content).strip()
+    if visible and not is_intentional_silence_response(visible) and agent._emit_redirect_reply(
+        visible, streamed_text=agent._fully_streamed_text(content),
+    ):
+        agent._last_content_with_tools = None
+        agent._last_content_tools_all_housekeeping = False
 
 
 def _clear_truncation_markers(messages) -> None:
@@ -69,8 +85,7 @@ def _clear_truncation_markers(messages) -> None:
 
 
 def resume_redirect(agent, state) -> bool:
-    pending = state._redirect_resume_pending or state._resumed_tool_redirects != getattr(agent, "_delivered_tool_redirects", 0)
-    if not pending or state.finish_reason != "stop" or agent._interrupt_requested:
+    if not _redirect_reply_pending(agent, state) or state.finish_reason != "stop" or agent._interrupt_requested:
         return False
     reply = agent._build_assistant_message(state.assistant_message, state.finish_reason)
     content = flatten_message_text(reply.get("content"))

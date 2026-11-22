@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from agent.message_metadata import append_message
 from agent.message_sanitization import coalesce_tool_call_id, normalize_provider_tool_call_ids
+from agent.turn_final_response import deliver_redirect_reply_with_tools
 from agent.turn_preflight import compress_after_tool_results
 from agent.turn_tool_validation import validate_tool_calls
 
@@ -51,7 +52,7 @@ def run_tool_round(
     conversation_history: Any, api_call_count: Any, effective_task_id: Any, user_message: Any,
     system_message: Any, active_system_prompt: Any, compression_attempts: Any,
     max_compression_attempts: Any, final_response: Any, failed: Any, _turn_exit_reason: Any,
-    truncated_tool_call_retries: Any, current_turn_user_idx: Any,
+    truncated_tool_call_retries: Any, current_turn_user_idx: Any, redirect_reply: bool = False,
 ) -> ToolRoundVerdict:
     """Execute one tool round in the exact original order. Persist-before-execute is a
     durability invariant: resume must see the executed block if a destructive tool restarts
@@ -151,6 +152,9 @@ def run_tool_round(
         final_response = ""
         failed = True
         return _verdict("break")
+
+    if redirect_reply:
+        deliver_redirect_reply_with_tools(agent, assistant_msg)
 
     # A UI must never observe an assistant/tool-call row that is only an in-memory
     # projection: emit interim commentary after the DB append.

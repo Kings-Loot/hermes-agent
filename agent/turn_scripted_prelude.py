@@ -45,7 +45,7 @@ def run_scripted_prelude(agent: Any, s: Any, prelude: Prelude) -> Any:
         s.assistant_message = NormalizedResponse(
             content=content, finish_reason="tool_calls",
             tool_calls=[build_tool_call(prelude_call_id(agent.session_id, name, args, len(s.messages)), name, args)])
-        verdict = _run_phase(run_tool_round, agent, s)
+        verdict = _run_phase(run_tool_round, agent, s, redirect_reply=False)
         if verdict.action != "continue":
             break
         tail = s.messages[-1] if s.messages else {}
