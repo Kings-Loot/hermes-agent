@@ -35,6 +35,7 @@ from hermes_cli.config import get_hermes_home
 from tools.process_registry_notifications import (
     format_process_notification, heartbeat_output_tail, is_child_process_notification, should_surface_notification)
 from tools.process_registry_checkpoint import ProcessCheckpointMixin
+from tools.process_registry_adoption import ProcessAdoptionMixin
 from tools.process_registry_output_log import ProcessOutputLogMixin, open_output_log, record_exit_command, worker_output_log
 from tools.process_registry_termination import ProcessTerminationMixin
 from tools.process_registry_results import load_completed_results, save_completed_result
@@ -671,7 +672,7 @@ _WSL_CHAIN_NOTE = (
 )
 
 
-class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOutputLogMixin):
+class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOutputLogMixin, ProcessAdoptionMixin):
     """In-memory registry of running and finished background processes.
     Thread-safe: accessed from executor threads (terminal_tool, process handlers),
     the gateway asyncio loop (watchers, reset checks) and the cleanup thread."""
@@ -2243,9 +2244,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
                 if session.pid:
                     os.kill(session.pid, signal.SIGTERM)
         elif session.process:
-            # Tree kill: on Windows Popen.terminate() only kills the shell wrapper and
-            # leaves Git Bash descendants behind.
-            self._terminate_host_pid(session.process.pid, session.host_start_time)
+            self._terminate_session_process(session)
         elif session.env_ref and session.pid:
             session.env_ref.execute(f"kill {session.pid} 2>/dev/null", timeout=5)
         elif session.detached and session.pid_scope == "host" and session.pid:
