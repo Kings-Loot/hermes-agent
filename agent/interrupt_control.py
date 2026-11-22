@@ -24,7 +24,6 @@ _REASON_USER_INTERRUPT = "user interrupt"
 USER_INTERRUPT_REASONS = frozenset({_REASON_HARD_STOP, _REASON_NEW_MESSAGE, _REASON_USER_INTERRUPT})
 # ``tool_reason`` the gateway's restart/shutdown stop passes (gateway.run._INTERRUPT_TOOL_REASON_GATEWAY_SHUTDOWN).
 _REASON_GATEWAY_SHUTDOWN = "gateway shutdown"
-_TOOL_REDIRECT = object()
 
 
 def interrupt_issuer(agent) -> Optional[str]:
@@ -110,13 +109,11 @@ def _steer_fates(agent) -> dict:
 
 
 def _is_steer_transfer(ticket) -> bool:
-    return ticket is not None and ticket is not _TOOL_REDIRECT
+    return ticket is not None
 
 
-def note_steer_delivery(agent, steer_text: str) -> None:
-    drained, parts = vars(agent).get("_steer_last_drain", (None, ()))
-    if drained == steer_text and any(ticket is _TOOL_REDIRECT for ticket, _ in parts):
-        agent._delivered_tool_redirects = getattr(agent, "_delivered_tool_redirects", 0) + 1
+def note_redirect_delivery(agent) -> None:
+    agent._delivered_redirects = getattr(agent, "_delivered_redirects", 0) + 1
 
 
 def requeue_drained_steer(agent, steer_text: str) -> None:
@@ -359,7 +356,7 @@ class InterruptControlMixin:
         # `sleep` poller, a build), so ask the tool workers to YIELD: terminal hands the live
         # process to the background registry and returns; tools that don't yield are unaffected.
         if getattr(self, "_executing_tools", False):
-            accepted = self.steer(cleaned, ticket=_TOOL_REDIRECT)
+            accepted = self.steer(cleaned)
             if accepted:
                 tracker = getattr(self, "_tool_worker_threads", None)
                 tracker_lock = getattr(self, "_tool_worker_threads_lock", None)

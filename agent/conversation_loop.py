@@ -1488,8 +1488,8 @@ class _LoopState:
     final_response: Any = None
     interrupted: bool = False
     failed: bool = False
-    _redirect_resume_pending: bool = False
-    _resumed_tool_redirects: int = 0
+    _requested_redirects: int = 0
+    _resumed_redirects: int = 0
     codex_ack_continuations: int = 0
     length_continue_retries: int = 0
     # Backstop for the refunding restarts (redirect / rebuilt-for-fallback). Unlike
@@ -1579,6 +1579,8 @@ def _run_api_retry_loop(agent, s: _LoopState) -> Optional[dict[str, Any]]:
 
     Returns a turn result dict when a phase ends the turn, else None once the loop is left
     (success, a restart armed on ``s._retry``, interrupt, or retries exhausted)."""
+    delivered_redirects = getattr(agent, "_delivered_redirects", 0)
+    text_only = delivered_redirects != s._requested_redirects
     while s.retry_count < s.max_retries:
         _ng = _run_phase(nous_rate_limit_guard, agent, s)
         if _ng.action == "return":
@@ -1586,8 +1588,10 @@ def _run_api_retry_loop(agent, s: _LoopState) -> Optional[dict[str, Any]]:
         if _ng.action == "break":
             return None
         try:
-            _run_phase(build_api_request, agent, s)
-            if _run_phase(perform_api_call, agent, s).action == "break":
+            _run_phase(build_api_request, agent, s, text_only=text_only)
+            call = _run_phase(perform_api_call, agent, s)
+            s._requested_redirects = delivered_redirects
+            if call.action == "break":
                 return None
             _rc = _run_phase(check_api_response, agent, s)
             if _rc.action == "return":
@@ -1712,10 +1716,11 @@ def _run_conversation_turn(
     agent._auth_pool_refresh_counts = {}
     agent._last_turn_usage = None
 
+    delivered_redirects = getattr(agent, "_delivered_redirects", 0)
     s = _LoopState(
         system_message=system_message, moa_config=moa_config,
         max_compression_attempts=getattr(agent, "max_compression_attempts", 3),
-        _resumed_tool_redirects=getattr(agent, "_delivered_tool_redirects", 0),
+        _requested_redirects=delivered_redirects, _resumed_redirects=delivered_redirects,
         **{f.name: getattr(_ctx, f.name.lstrip("_")) for f in fields(_LoopState) if f.name in _CTX_FIELDS},
     )
     # Opt-in runtime: api_mode == codex_app_server hands the whole turn to the codex

@@ -57,13 +57,12 @@ class FinalResponseVerdict:
 
 
 def _redirect_reply_pending(agent, state) -> bool:
-    return state._redirect_resume_pending or state._resumed_tool_redirects != getattr(agent, "_delivered_tool_redirects", 0)
+    return state._resumed_redirects != getattr(agent, "_delivered_redirects", 0)
 
 
 def consume_redirect_reply(agent, state) -> bool:
     pending = _redirect_reply_pending(agent, state)
-    state._redirect_resume_pending = False
-    state._resumed_tool_redirects = getattr(agent, "_delivered_tool_redirects", 0)
+    state._resumed_redirects = getattr(agent, "_delivered_redirects", 0)
     return pending
 
 
