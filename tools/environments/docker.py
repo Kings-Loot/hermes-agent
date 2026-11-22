@@ -1107,13 +1107,11 @@ class DockerEnvironment(BaseEnvironment):
                   stdin_data: str | None = None) -> subprocess.Popen:
         from tools.process_registry import ProcessRegistry
 
-        if login:
-            # Login shells seed the snapshot (or are its fallback): the profile's functions and
-            # aliases must load in the shell that runs the command, which the wrapper's child is not.
-            return self._run_bash_untracked(cmd_string, login=True, timeout=timeout, stdin_data=stdin_data)
         record = DockerForeground(self, term_grace=ProcessRegistry._daemon_term_grace_seconds())
-        proc = self._run_bash_untracked(record.wrap(cmd_string), login=login,
-                                        timeout=timeout, stdin_data=stdin_data)
+        # The owned child, not the wrapper, is the login shell: profile functions and aliases
+        # must load where the command (or snapshot bootstrap) runs.
+        proc = self._run_bash_untracked(record.wrap(cmd_string, login=login), login=login,
+                                        shell_login=False, timeout=timeout, stdin_data=stdin_data)
         self._foreground_commands[id(proc)] = record
         return proc
 
@@ -1140,6 +1138,7 @@ class DockerEnvironment(BaseEnvironment):
             super()._kill_process(proc)
 
     def _run_bash_untracked(self, cmd_string: str, *, login: bool = False,
+                            shell_login: bool | None = None,
                             timeout: int = 120,
                             stdin_data: str | None = None) -> subprocess.Popen:
         """Spawn bash inside the container. Init seeds the snapshot; profile-scoped passthrough
@@ -1163,7 +1162,8 @@ class DockerEnvironment(BaseEnvironment):
         elif self._profile_scoped_passthrough:
             runtime_args, unset_names, env_values = self._build_runtime_env_args_with_unsets()
             cmd.extend(runtime_args)
-        cmd += [self._container_id, *bash_argv(prepend_unset(cmd_string, unset_names), login)]
+        cmd += [self._container_id, *bash_argv(prepend_unset(cmd_string, unset_names),
+                                                login if shell_login is None else shell_login)]
 
         client_env = self._docker_client_env(env_values)
         return _popen_bash(cmd, stdin_data, env=client_env) if client_env is not None else _popen_bash(cmd, stdin_data)
