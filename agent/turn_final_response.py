@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+from contextlib import suppress
 from typing import Any, Dict, Optional
 
+from agent.message_content import flatten_message_text
 from agent.message_metadata import append_message
 from agent.reasoning_promotion import answer_in_reasoning_capability
 from agent.repetition_guard import STOP_PATH_MIN_CHARS, is_runaway_repetition
@@ -18,6 +20,7 @@ from agent.turn_failure_copy import stamp_failure
 from agent.turn_empty_response import recover_empty_response
 from agent.turn_stop_gates import apply_stop_gates
 from agent.turn_truncation import partial_result, repetition_copy
+from gateway.response_filters import is_intentional_silence_response
 
 _REPETITION_STOPPED = repetition_copy(
     "before delivery",
@@ -51,6 +54,60 @@ class FinalResponseVerdict:
     _pending_verification_response_previewed: Any
     api_call_count: int
     result: Optional[dict[str, Any]] = None
+
+
+def consume_redirect_reply(agent, state) -> None:
+    state._redirect_resume_pending = False
+    state._resumed_tool_redirects = getattr(agent, "_delivered_tool_redirects", 0)
+
+
+def _clear_truncation_markers(messages) -> None:
+    for row in messages:
+        if isinstance(row, dict):
+            row.pop("_length_continuation_fragment", None)
+            row.pop("_length_continuation_nudge", None)
+
+
+def resume_redirect(agent, state) -> bool:
+    pending = state._redirect_resume_pending or state._resumed_tool_redirects != getattr(agent, "_delivered_tool_redirects", 0)
+    if not pending or state.finish_reason != "stop" or agent._interrupt_requested:
+        return False
+    reply = agent._build_assistant_message(state.assistant_message, state.finish_reason)
+    content = flatten_message_text(reply.get("content"))
+    streamed_text = agent._fully_streamed_text(content)
+    if state.truncated_response_parts:
+        from agent.conversation_loop import _join_truncated_parts
+
+        content = _join_truncated_parts([*state.truncated_response_parts, (content, False)])
+        streamed_parts = state.truncated_streamed_parts
+        if streamed_text and len(streamed_parts) == len(state.truncated_response_parts) and all(streamed_parts):
+            streamed_text = "".join([*streamed_parts, streamed_text])
+        else:
+            streamed_text = None
+    visible = agent._strip_think_blocks(content).strip()
+    silent = is_intentional_silence_response(visible)
+    if not silent and not agent._emit_redirect_reply(visible, streamed_text=streamed_text):
+        return False
+    if state.truncated_response_parts:
+        _clear_truncation_markers(state.messages)
+        state.truncated_response_parts = []
+        state.truncated_streamed_parts.clear()
+        state.length_continue_retries = 0
+    consume_redirect_reply(agent, state)
+    state.final_response = None
+    if silent:
+        reply.update(content="", api_content=visible, display_kind="hidden")
+        if agent.stream_delta_callback:
+            with suppress(Exception):
+                agent.stream_delta_callback(None)
+    append_message(state.messages, reply)
+    if not agent._interrupt_requested:
+        append_message(state.messages, {
+            "role": "user", "content": "", "display_kind": "hidden",
+            "api_content": "Continue the original task from the progress already made. "
+            "If the original task is already finished, reply with [SILENT].",
+        })
+    return True
 
 
 def finish_text_response(
@@ -255,10 +312,7 @@ def finish_text_response(
         truncated_response_parts = []
         length_continue_retries = 0
         # The continuation recovered, so the fragments stay in the transcript.
-        for _frag in messages:
-            if isinstance(_frag, dict):
-                _frag.pop("_length_continuation_fragment", None)
-                _frag.pop("_length_continuation_nudge", None)
+        _clear_truncation_markers(messages)
 
     final_response = agent._strip_think_blocks(final_response).strip()
 

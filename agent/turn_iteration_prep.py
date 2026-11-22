@@ -288,7 +288,7 @@ def _inject_steer_after_newest_tool_result(agent: Any, messages: Any, steer_text
         _sm = messages[_si]
         if isinstance(_sm, dict) and _sm.get("role") == "tool":
             from agent.prompt_builder import steer_user_row
-            messages.insert(_si + 1, steer_user_row(steer_text))
+            messages.insert(_si + 1, steer_user_row(steer_text, agent=agent))
             logger.debug("Pre-API-call steer drain: appended user row after tool msg at index %d", _si)
             return
     from agent.agent_runtime_helpers import _requeue_pending_steer
@@ -347,11 +347,12 @@ class IterationStart:
     api_call_count: Any
     interrupted: Any
     _turn_exit_reason: Any
+    _redirect_resume_pending: bool = False
 
 
 def begin_iteration(
     agent: Any, *, messages: Any, conversation_history: Any, original_user_message: Any,
-    api_call_count: Any, interrupted: Any, _turn_exit_reason: Any,
+    api_call_count: Any, interrupted: Any, _turn_exit_reason: Any, _redirect_resume_pending: bool = False,
 ) -> IterationStart:
     """Iteration entry in the original order: apply a pending redirect, reset the checkpoint
     dedup, then the interrupt / review-budget / iteration-budget exits. ``api_call_count`` is
@@ -365,11 +366,13 @@ def begin_iteration(
             action=action, original_user_message=original_user_message,
             api_call_count=api_call_count, interrupted=interrupted,
             _turn_exit_reason=_turn_exit_reason,
+            _redirect_resume_pending=_redirect_resume_pending,
         )
 
     _redirect_text = agent._drain_pending_redirect()
     if _redirect_text:
         _apply_active_turn_redirect(agent, messages, _redirect_text)
+        _redirect_resume_pending = True
         if isinstance(original_user_message, str):
             original_user_message = (
                 f"{original_user_message}\n\n" f"User correction during the turn: {_redirect_text}"

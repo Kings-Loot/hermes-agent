@@ -13,6 +13,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field, fields
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from agent.agent_runtime_helpers_placeholders import hidden_interrupt_placeholder_row
@@ -44,7 +45,7 @@ from agent.turn_api_call import handle_api_interrupt, nous_rate_limit_guard, per
 from agent.turn_api_error import handle_api_error
 from agent.turn_api_request import build_api_request
 from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, OPEN_TURN_TAIL_ROLES, failed_turn_notice, site_copy
-from agent.turn_final_response import finish_text_response
+from agent.turn_final_response import consume_redirect_reply, finish_text_response, resume_redirect
 from agent.turn_finalizer import finalize_turn
 from agent.turn_iteration_prep import (
     announce_api_call,
@@ -1487,6 +1488,8 @@ class _LoopState:
     final_response: Any = None
     interrupted: bool = False
     failed: bool = False
+    _redirect_resume_pending: bool = False
+    _resumed_tool_redirects: int = 0
     codex_ack_continuations: int = 0
     length_continue_retries: int = 0
     # Backstop for the refunding restarts (redirect / rebuilt-for-fallback). Unlike
@@ -1497,6 +1500,7 @@ class _LoopState:
     _outer_error_count: int = 0  # outer-loop exceptions this turn (#92450), see _MAX_OUTER_LOOP_ERRORS
     truncated_tool_call_retries: int = 0
     truncated_response_parts: list[tuple[str, bool]] = field(default_factory=list)
+    truncated_streamed_parts: list[str | None] = field(default_factory=list)
     compression_attempts: int = 0
     _last_preflight_pressure: Optional[int] = None
     # A provider overflow outweighs the rough-estimate calibration that defers preflight after
@@ -1711,6 +1715,7 @@ def _run_conversation_turn(
     s = _LoopState(
         system_message=system_message, moa_config=moa_config,
         max_compression_attempts=getattr(agent, "max_compression_attempts", 3),
+        _resumed_tool_redirects=getattr(agent, "_delivered_tool_redirects", 0),
         **{f.name: getattr(_ctx, f.name.lstrip("_")) for f in fields(_LoopState) if f.name in _CTX_FIELDS},
     )
     # Opt-in runtime: api_mode == codex_app_server hands the whole turn to the codex
@@ -1757,9 +1762,7 @@ def _run_conversation_turn(
                 return _ri.result
             if _ri.action == "continue":
                 continue
-            _v = _run_phase(
-                run_tool_round if s.assistant_message.tool_calls else finish_text_response, agent, s
-            )
+            _v = _finish_iteration(agent, s)
             if _v.action == "return":
                 return _v.result
             if _v.action == "break":
@@ -1780,6 +1783,15 @@ def _run_conversation_turn(
         # future input can move to a clean session (#98722).
         result.update(error=_COMPRESSION_TIMEOUT_FINAL_RESPONSE, partial=True, compression_exhausted=True)
     return result
+
+
+def _finish_iteration(agent, state: _LoopState):
+    if state.assistant_message.tool_calls:
+        consume_redirect_reply(agent, state)
+        return _run_phase(run_tool_round, agent, state)
+    if resume_redirect(agent, state):
+        return SimpleNamespace(action="continue")
+    return _run_phase(finish_text_response, agent, state)
 
 
 def run_conversation(
@@ -1811,7 +1823,7 @@ def run_conversation(
     from tools.vision_tools_history_budget import native_turn_images
 
     # Steer / redirect / interrupt set this mid-turn; the result reports whether the turn ran untouched.
-    agent._turn_user_intervened = False
+    agent._turn_user_intervened = agent._redirect_reply_delivered = False
     # Images attached natively to this user turn stay visible to vision_analyze for the turn, so
     # it does not embed the same pixels a second time into the same request (#76411).
     with native_turn_images(user_message):
@@ -1838,6 +1850,8 @@ def run_conversation(
     result = export_current_turn_boundary(agent, result, user_message)
     if isinstance(result, dict):
         result["user_intervened"] = bool(getattr(agent, "_turn_user_intervened", False))
+        if agent._redirect_reply_delivered:
+            result["redirect_reply_delivered"] = True
     _close_durable_failed_turn(agent, result)
     return result
 

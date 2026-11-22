@@ -6,6 +6,7 @@ Extracted from ``run_agent.py``; every method resolves through ``AIAgent``'s MRO
 import logging
 import re
 import threading
+from functools import partial
 from typing import Any, Dict, List
 
 from agent.memory_context import sanitize_context
@@ -121,6 +122,11 @@ class StreamDeliveryMixin:
         visible, streamed = self._interim_visible_and_streamed(content)
         return bool(visible) and visible == streamed
 
+    def _fully_streamed_text(self, content: str) -> str | None:
+        if self._interim_content_fully_streamed(content):
+            return self._current_streamed_assistant_text
+        return None
+
     def _extract_codex_interim_visible_parts(self, assistant_msg: dict[str, Any]) -> list[str]:
         """Visible Codex commentary (``phase=commentary`` items), one string per message item.
 
@@ -173,17 +179,35 @@ class StreamDeliveryMixin:
                 self._delivered_interim_texts = set()
             self._delivered_interim_texts.add(normalized)
 
-    def _deliver_interim(self, visible: str, *, already_streamed: bool, record: list[str]) -> None:
-        """Hand ``visible`` to ``interim_assistant_callback`` and mark ``record`` delivered; swallows callback errors."""
-        cb = getattr(self, "interim_assistant_callback", None)
+    def _emit_redirect_reply(self, visible: str, *, streamed_text: str | None = None) -> bool:
+        if not visible or visible == "(empty)" or self._interrupt_requested:
+            return False
+        redirect_cb = getattr(self, "redirect_reply_callback", None)
+        cb = redirect_cb or getattr(self, "interim_assistant_callback", None)
+        already_streamed = streamed_text is not None
+        if redirect_cb is not None and already_streamed:
+            cb = partial(redirect_cb, streamed_text=streamed_text)
+        delivered = already_streamed if cb is None else self._deliver_interim(
+            visible, already_streamed=already_streamed, record=[visible], callback=cb,
+        )
+        self._redirect_reply_delivered = self._redirect_reply_delivered or delivered
+        return delivered
+
+    def _deliver_interim(self, visible: str, *, already_streamed: bool, record: list[str], callback=None) -> bool:
+        """Hand ``visible`` to the interim sink and mark accepted text delivered."""
+        cb = callback or getattr(self, "interim_assistant_callback", None)
         if cb is None:
-            return
+            return False
         try:
-            cb(visible, already_streamed=already_streamed)
+            accepted = cb(visible, already_streamed=already_streamed)
+            if callback is not None and accepted is False:
+                return False
             for part in record:
                 self._record_delivered_interim_text(part)
+            return True
         except Exception:
             logger.debug("interim_assistant_callback error", exc_info=True)
+            return False
 
     def _fire_streamed_codex_commentary(self, text: str) -> None:
         """Deliver a completed live Codex commentary message immediately."""

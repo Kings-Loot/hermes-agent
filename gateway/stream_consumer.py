@@ -562,14 +562,18 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
                     await self._eager_reopen_seed()
                     continue
 
-                if tick.got_done:
+                if tick.got_done or tick.got_segment_break:
                     self._flush_think_buffer()
                     # A bare intentional-silence marker (NO_REPLY / [SILENT]): the
                     # gateway's whole-response filter runs too late for a streamed
                     # preview, so retract it here instead of finalizing.
                     if _is_intentional_silence_response(self._clean_for_display(self._accumulated)):
-                        await self._suppress_silence_marker()
-                        return
+                        await self._suppress_silence_marker(segment_only=not tick.got_done)
+                        if tick.got_done:
+                            return
+                        self._reset_segment_state()
+                        self._signal_flush(tick.flush_event)
+                        continue
 
                 if self._should_edit(tick) and (
                     self._accumulated or (self._use_native_streaming and self._tool_progress_active)
