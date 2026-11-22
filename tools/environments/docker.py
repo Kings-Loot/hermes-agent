@@ -1107,6 +1107,10 @@ class DockerEnvironment(BaseEnvironment):
                   stdin_data: str | None = None) -> subprocess.Popen:
         from tools.process_registry import ProcessRegistry
 
+        if login:
+            # Login shells seed the snapshot (or are its fallback): the profile's functions and
+            # aliases must load in the shell that runs the command, which the wrapper's child is not.
+            return self._run_bash_untracked(cmd_string, login=True, timeout=timeout, stdin_data=stdin_data)
         record = DockerForeground(self, term_grace=ProcessRegistry._daemon_term_grace_seconds())
         proc = self._run_bash_untracked(record.wrap(cmd_string), login=login,
                                         timeout=timeout, stdin_data=stdin_data)
