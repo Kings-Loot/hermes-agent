@@ -144,3 +144,28 @@ def test_streamed_redirect_reply_resumes_without_interim_callback(agent):
     assert "".join(rendered).strip() == answer
     assert len(requests) == 3
     assert result["final_response"] == "Original report completed."
+
+
+def test_truncated_redirect_reply_does_not_leak_into_original_final(agent):
+    sent = []
+    requests = []
+    agent.interim_assistant_callback = lambda text, **_: sent.append(text)
+
+    def respond(api_kwargs):
+        requests.append(api_kwargs["messages"])
+        if len(requests) == 1:
+            assert agent.redirect("Which schema are you using?")
+            raise InterruptedError("redirect")
+        if len(requests) == 2:
+            return test_run_agent._mock_response(content="I am using staging.", finish_reason="length")
+        if len(requests) == 3:
+            return test_run_agent._mock_response(content="It has the expected tables.")
+        return test_run_agent._mock_response(content="Original report completed.")
+
+    with patch.object(agent, "_interruptible_api_call", side_effect=respond):
+        result = agent.run_conversation("Complete the original report.")
+
+    assert len(requests) == 4
+    assert (sent, result["final_response"]) == (
+        ["I am using staging.\nIt has the expected tables."], "Original report completed.",
+    )

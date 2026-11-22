@@ -60,15 +60,32 @@ def consume_redirect_reply(agent, state) -> None:
     state._resumed_tool_redirects = getattr(agent, "_delivered_tool_redirects", 0)
 
 
+def _clear_truncation_markers(messages) -> None:
+    for row in messages:
+        if isinstance(row, dict):
+            row.pop("_length_continuation_fragment", None)
+            row.pop("_length_continuation_nudge", None)
+
+
 def resume_redirect(agent, state) -> bool:
     pending = state._redirect_resume_pending or state._resumed_tool_redirects != getattr(agent, "_delivered_tool_redirects", 0)
     if not pending or state.finish_reason != "stop" or agent._interrupt_requested:
         return False
     reply = agent._build_assistant_message(state.assistant_message, state.finish_reason)
     visible = agent._strip_think_blocks(flatten_message_text(reply.get("content"))).strip()
+    if state.truncated_response_parts:
+        from agent.conversation_loop import _join_truncated_parts
+
+        visible = agent._strip_think_blocks(_join_truncated_parts([
+            *state.truncated_response_parts, (flatten_message_text(reply.get("content")), False),
+        ])).strip()
     silent = is_intentional_silence_response(visible)
     if not silent and not agent._emit_redirect_reply(visible):
         return False
+    if state.truncated_response_parts:
+        _clear_truncation_markers(state.messages)
+        state.truncated_response_parts = []
+        state.length_continue_retries = 0
     consume_redirect_reply(agent, state)
     state.final_response = None
     if silent:
@@ -285,10 +302,7 @@ def finish_text_response(
         truncated_response_parts = []
         length_continue_retries = 0
         # The continuation recovered, so the fragments stay in the transcript.
-        for _frag in messages:
-            if isinstance(_frag, dict):
-                _frag.pop("_length_continuation_fragment", None)
-                _frag.pop("_length_continuation_nudge", None)
+        _clear_truncation_markers(messages)
 
     final_response = agent._strip_think_blocks(final_response).strip()
 
