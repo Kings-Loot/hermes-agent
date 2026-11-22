@@ -45,7 +45,7 @@ from agent.turn_api_call import handle_api_interrupt, nous_rate_limit_guard, per
 from agent.turn_api_error import handle_api_error
 from agent.turn_api_request import build_api_request
 from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, OPEN_TURN_TAIL_ROLES, failed_turn_notice, site_copy
-from agent.turn_final_response import finish_text_response, resume_silent_redirect
+from agent.turn_final_response import consume_redirect_reply, finish_text_response, resume_redirect
 from agent.turn_finalizer import finalize_turn
 from agent.turn_iteration_prep import (
     announce_api_call,
@@ -1786,8 +1786,9 @@ def _run_conversation_turn(
 
 def _finish_iteration(agent, state: _LoopState):
     if state.assistant_message.tool_calls:
+        consume_redirect_reply(agent, state)
         return _run_phase(run_tool_round, agent, state)
-    if resume_silent_redirect(agent, state):
+    if resume_redirect(agent, state):
         return SimpleNamespace(action="continue")
     return _run_phase(finish_text_response, agent, state)
 
@@ -1821,7 +1822,7 @@ def run_conversation(
     from tools.vision_tools_history_budget import native_turn_images
 
     # Steer / redirect / interrupt set this mid-turn; the result reports whether the turn ran untouched.
-    agent._turn_user_intervened = False
+    agent._turn_user_intervened = agent._redirect_reply_delivered = False
     # Images attached natively to this user turn stay visible to vision_analyze for the turn, so
     # it does not embed the same pixels a second time into the same request (#76411).
     with native_turn_images(user_message):
@@ -1848,6 +1849,8 @@ def run_conversation(
     result = export_current_turn_boundary(agent, result, user_message)
     if isinstance(result, dict):
         result["user_intervened"] = bool(getattr(agent, "_turn_user_intervened", False))
+        if agent._redirect_reply_delivered:
+            result["redirect_reply_delivered"] = True
     _close_durable_failed_turn(agent, result)
     return result
 

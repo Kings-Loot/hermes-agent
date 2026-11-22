@@ -35,7 +35,7 @@ def test_silent_midturn_input_does_not_end_original_work(agent, final):
     assert len(requests) == 3
     assert result["final_response"] == final
     assert sum(m.get("content") == "Complete the original report." for m in requests[-1]) == 1
-    assert requests[-1][-1]["content"] == "Continue the original task from the progress already made."
+    assert requests[-1][-1]["content"].startswith("Continue the original task from the progress already made.")
 
 
 @pytest.mark.parametrize("followups", [1, 2])

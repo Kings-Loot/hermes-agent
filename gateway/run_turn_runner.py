@@ -17,6 +17,7 @@ import threading
 import time
 from contextlib import suppress
 from datetime import datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from agent.i18n import t
@@ -293,9 +294,11 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                     # stitched as a "partial delivery" nobody received (classic -q parity).
                     raise _NoStreamConsumer()
 
-        def interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
+        def interim_assistant_cb(text: str, *, already_streamed: bool = False, redirect_reply: bool = False):
             if not ctx._run_still_current():
-                return
+                return False
+            if redirect_reply and not local_viewer_route:
+                already_streamed = bool(already_streamed and stream_consumer and stream_consumer.stream_deltas_enabled)
             unseen = False
             if local_viewer_route and not already_streamed and str(text or "").strip():
                 # LocalSessionAdapter.send publishes nothing, so unstreamed commentary handed to the
@@ -312,13 +315,37 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                     stts.on_delta(text)
                     stts.on_delta(None)
             if unseen:
-                return
+                return False
             if stream_consumer is not None:
                 stream_consumer.on_segment_break() if already_streamed else stream_consumer.on_commentary(text)
+                if redirect_reply:
+                    return stream_consumer.flush_pending_sync() and stream_consumer.has_durably_delivered_text(text)
+            elif redirect_reply and not local_viewer_route:
+                return self._deliver_unstreamed_redirect_reply(text)
             elif not already_streamed and ctx._status_adapter and str(text or "").strip():
                 self._send_status_text(text, ctx._status_thread_metadata, "interim_assistant_callback scheduling error")
 
         return stream_consumer, stream_delta_cb, interim_assistant_cb, want_interim_messages
+
+    def _deliver_unstreamed_redirect_reply(self, text: str) -> bool:
+        if not self._ctx._status_adapter:
+            return False
+        future = self._schedule(self._send_redirect_reply(text), "redirect reply scheduling error")
+        if future is None:
+            return False
+        try:
+            return future.result(timeout=5)
+        except TimeoutError:
+            future.cancel()
+            return False
+
+    async def _send_redirect_reply(self, text: str) -> bool:
+        ctx = self._ctx
+        if not ctx._run_still_current():
+            return False
+        metadata = {**(ctx._status_thread_metadata or {}), "_interim_send": True}
+        result = await ctx._status_adapter.send(ctx._status_chat_id, text, metadata=metadata)
+        return result.success
 
 
     # ── per-turn agent wiring ───────────────────────────────────────────────────────────────
@@ -451,6 +478,9 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         agent.step_callback = ctx._step_callback_sync if (ctx._hooks_ref.loaded_hooks or self._approval_owner is not None) else None
         agent.stream_delta_callback = stream_delta_cb
         agent.interim_assistant_callback = interim_assistant_cb if want_interim_messages else None
+        agent.redirect_reply_callback = (
+            partial(interim_assistant_cb, redirect_reply=True) if interim_assistant_cb is not None else None
+        )
         from gateway.run_turn_progress import local_viewer_turn
         agent.status_callback, agent.notice_callback = ctx._status_callback_sync, (
             self._local_notice_callback_sync if local_viewer_turn(self) else self._notice_callback_sync)
@@ -1359,6 +1389,7 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         # about to shrink.
         common = {
             "messages": result.get("messages", []), "api_calls": result.get("api_calls", 0),
+            "redirect_reply_delivered": result.get("redirect_reply_delivered", False),
             "failed": result.get("failed", False), "failure_reason": result.get("failure_reason"),
             # Usage-window limit (agent/plan_limits.py): the gateway offers the plan's model as a button.
             "usage_limit": result.get("usage_limit"),

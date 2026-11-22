@@ -54,26 +54,31 @@ class FinalResponseVerdict:
     result: Optional[dict[str, Any]] = None
 
 
-def resume_silent_redirect(agent, state) -> bool:
-    delivered_tool_redirects = getattr(agent, "_delivered_tool_redirects", 0)
-    pending = state._redirect_resume_pending or state._resumed_tool_redirects != delivered_tool_redirects
-    if (
-        not pending or state.finish_reason != "stop"
-        or not is_intentional_silence_response(state.assistant_message.content)
-        or agent._interrupt_requested
-    ):
-        return False
+def consume_redirect_reply(agent, state) -> None:
     state._redirect_resume_pending = False
-    state._resumed_tool_redirects = delivered_tool_redirects
+    state._resumed_tool_redirects = getattr(agent, "_delivered_tool_redirects", 0)
+
+
+def resume_redirect(agent, state) -> bool:
+    pending = state._redirect_resume_pending or state._resumed_tool_redirects != getattr(agent, "_delivered_tool_redirects", 0)
+    if not pending or state.finish_reason != "stop" or agent._interrupt_requested:
+        return False
+    reply = agent._build_assistant_message(state.assistant_message, state.finish_reason)
+    visible = agent._interim_assistant_visible_text(reply)
+    silent = is_intentional_silence_response(visible)
+    if not silent and not agent._emit_redirect_reply(visible):
+        return False
+    consume_redirect_reply(agent, state)
     state.final_response = None
-    append_message(state.messages, {
-        "role": "assistant", "content": "",
-        "api_content": "No answer was needed for the follow-up.", "display_kind": "hidden",
-    })
-    append_message(state.messages, {
-        "role": "user", "content": "",
-        "api_content": "Continue the original task from the progress already made.", "display_kind": "hidden",
-    })
+    if silent:
+        reply.update(content="", api_content=visible, display_kind="hidden")
+    append_message(state.messages, reply)
+    if not agent._interrupt_requested:
+        append_message(state.messages, {
+            "role": "user", "content": "", "display_kind": "hidden",
+            "api_content": "Continue the original task from the progress already made. "
+            "If the original task is already finished, reply with [SILENT].",
+        })
     return True
 
 
