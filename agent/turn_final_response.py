@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import logging
 from typing import Any, Dict, Optional
 
+from agent.message_content import flatten_message_text
 from agent.message_metadata import append_message
 from agent.reasoning_promotion import answer_in_reasoning_capability
 from agent.repetition_guard import STOP_PATH_MIN_CHARS, is_runaway_repetition
@@ -64,7 +65,7 @@ def resume_redirect(agent, state) -> bool:
     if not pending or state.finish_reason != "stop" or agent._interrupt_requested:
         return False
     reply = agent._build_assistant_message(state.assistant_message, state.finish_reason)
-    visible = agent._interim_assistant_visible_text(reply)
+    visible = agent._strip_think_blocks(flatten_message_text(reply.get("content"))).strip()
     silent = is_intentional_silence_response(visible)
     if not silent and not agent._emit_redirect_reply(visible):
         return False

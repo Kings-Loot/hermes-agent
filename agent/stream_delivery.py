@@ -174,11 +174,13 @@ class StreamDeliveryMixin:
             self._delivered_interim_texts.add(normalized)
 
     def _emit_redirect_reply(self, visible: str) -> bool:
-        cb = getattr(self, "redirect_reply_callback", None) or getattr(self, "interim_assistant_callback", None)
-        if not visible or visible == "(empty)" or cb is None or self._interrupt_requested:
+        if not visible or visible == "(empty)" or self._interrupt_requested:
             return False
-        delivered = self._deliver_interim(visible, already_streamed=self._interim_content_fully_streamed(visible),
-                                          record=[visible], callback=cb)
+        cb = getattr(self, "redirect_reply_callback", None) or getattr(self, "interim_assistant_callback", None)
+        already_streamed = self._interim_content_fully_streamed(visible)
+        delivered = already_streamed if cb is None else self._deliver_interim(
+            visible, already_streamed=already_streamed, record=[visible], callback=cb,
+        )
         self._redirect_reply_delivered = self._redirect_reply_delivered or delivered
         return delivered
 

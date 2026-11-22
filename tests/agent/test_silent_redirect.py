@@ -120,3 +120,27 @@ def test_targeted_redirect_answers_interim_then_finishes_original_work(agent):
     assert commentary == [answer]
     assert len(requests) == 3
     assert result["final_response"] == "Original report completed."
+
+
+def test_streamed_redirect_reply_resumes_without_interim_callback(agent):
+    answer = "Yes, I will use the staging schema."
+    rendered = []
+    requests = []
+    agent.stream_delta_callback = rendered.append
+
+    def respond(api_kwargs, **_):
+        requests.append(api_kwargs["messages"])
+        if len(requests) == 1:
+            assert agent.redirect("Can you use the staging schema?")
+            raise InterruptedError("redirect")
+        if len(requests) == 2:
+            agent._fire_stream_delta(answer)
+            return test_run_agent._mock_response(content=answer)
+        return test_run_agent._mock_response(content="Original report completed.")
+
+    with patch.object(agent, "_interruptible_streaming_api_call", side_effect=respond):
+        result = agent.run_conversation("Complete the original report.")
+
+    assert "".join(rendered).strip() == answer
+    assert len(requests) == 3
+    assert result["final_response"] == "Original report completed."

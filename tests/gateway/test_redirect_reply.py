@@ -72,7 +72,13 @@ async def test_standalone_redirect_answer_reaches_slack_before_original_task_fin
             raise InterruptedError("redirect")
         if len(requests) == 2:
             assert followup in messages[-1]["content"]
-            return test_run_agent._mock_response(content=answer)
+            reply = test_run_agent._mock_response(content=answer)
+            if case == "question":
+                reply.choices[0].message.codex_message_items = [
+                    {"type": "message", "phase": "commentary",
+                     "content": [{"type": "output_text", "text": "Internal working note."}]},
+                ]
+            return reply
         assert answer_sent.wait(timeout=5)
         assert [row["content"] for row in messages if row["role"] == "assistant"].count(answer) == 1
         if case == "stop":

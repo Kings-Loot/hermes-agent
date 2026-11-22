@@ -340,10 +340,12 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             return False
 
     async def _send_redirect_reply(self, text: str) -> bool:
+        from gateway.run import _interim_metadata
+
         ctx = self._ctx
         if not ctx._run_still_current():
             return False
-        metadata = {**(ctx._status_thread_metadata or {}), "_interim_send": True}
+        metadata = _interim_metadata(ctx._status_thread_metadata)
         result = await ctx._status_adapter.send(ctx._status_chat_id, text, metadata=metadata)
         return result.success
 
