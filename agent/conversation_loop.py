@@ -1787,8 +1787,8 @@ def _run_conversation_turn(
 
 def _finish_iteration(agent, state: _LoopState):
     if state.assistant_message.tool_calls:
-        consume_redirect_reply(agent, state)
-        return _run_phase(run_tool_round, agent, state)
+        redirect_reply = consume_redirect_reply(agent, state)
+        return _run_phase(run_tool_round, agent, state, redirect_reply=redirect_reply)
     if resume_redirect(agent, state):
         return SimpleNamespace(action="continue")
     return _run_phase(finish_text_response, agent, state)
