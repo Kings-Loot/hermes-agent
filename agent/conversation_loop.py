@@ -16,6 +16,7 @@ from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional
 
 from agent.agent_runtime_helpers_placeholders import hidden_interrupt_placeholder_row
+from agent.aside_continuity import ASIDE_CONTEXT, AsideContinuity, mark_aside
 from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.fast_mode import begin_turn as begin_fast_mode_turn
 from agent.message_metadata import append_message, without_persistence_fields
@@ -337,7 +338,8 @@ def _apply_active_turn_redirect(agent: Any, messages: list[dict[str, Any]], text
     elif visible:
         checkpoint_parts += ["Visible response before the interruption:", visible]
     checkpoint = "\n\n".join(checkpoint_parts)
-    correction = f"[Context from the interrupted assistant response]\n{checkpoint}\n\n{text}"
+    correction = f"[Context from the interrupted assistant response]\n{checkpoint}\n\n{ASIDE_CONTEXT}\n\n{text}"
+    mark_aside(agent)
 
     # The live tail is normally user or tool, so an assistant placeholder + correction
     # keeps strict alternation; if the tail is already assistant, the checkpoint is folded
@@ -1812,6 +1814,7 @@ def run_conversation(
 
     # Steer / redirect / interrupt set this mid-turn; the result reports whether the turn ran untouched.
     agent._turn_user_intervened = False
+    agent._aside_continuity = AsideContinuity()
     # Images attached natively to this user turn stay visible to vision_analyze for the turn, so
     # it does not embed the same pixels a second time into the same request (#76411).
     with native_turn_images(user_message):
@@ -1835,9 +1838,12 @@ def run_conversation(
             )
         finally:
             end_voice_turn_route(agent)
+            aside_state = agent._aside_continuity
+            agent._aside_continuity = None
     result = export_current_turn_boundary(agent, result, user_message)
     if isinstance(result, dict):
         result["user_intervened"] = bool(getattr(agent, "_turn_user_intervened", False))
+        result["aside_continued"] = aside_state.continued
     _close_durable_failed_turn(agent, result)
     return result
 

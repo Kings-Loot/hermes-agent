@@ -15,6 +15,8 @@ from contextlib import suppress
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List
 
+from agent.aside_continuity import CONTINUATION_NOTE, aside_pending, claim_continuation, deliver_aside, suppress_duplicate_aside
+from agent.message_metadata import append_message
 from agent.stream_single_writer import claim_stream_writer, stream_writer_is_current
 from agent.transports.hermes_tools_mcp_server import HERMES_TOOLS_MCP_SERVER_NAME
 from agent.sdk_transform_bypass import bypass_sdk_request_transform
@@ -707,15 +709,15 @@ def _finish_codex_turn(agent, turn, messages: list[dict[str, Any]], *, original_
     # Skill nudge check AFTER iters were incremented (same as chat_completions).
     should_review_skills = (0 < agent._skill_nudge_interval <= agent._iters_since_skill
                             and "skill_manage" in agent.valid_tool_names)
-    if should_review_skills:
+    if should_review_skills and not aside_pending(agent):
         agent._iters_since_skill = 0
     # External memory sync skipped on interrupt/error (no partial transcripts).
-    if not turn.interrupted and turn.error is None:
+    if not turn.interrupted and turn.error is None and not aside_pending(agent):
         _call_guarded(getattr(agent, "_sync_external_memory_for_turn", None), "external memory sync raised", kwargs=dict(
             original_user_message=original_user_message, final_response=turn.final_text, interrupted=False, messages=messages,
         ))
     # Background review fork: only when a trigger tripped AND a real final response exists.
-    if turn.final_text and not turn.interrupted and (should_review_memory or should_review_skills):
+    if turn.final_text and not turn.interrupted and not aside_pending(agent) and (should_review_memory or should_review_skills):
         _call_guarded(getattr(agent, "_spawn_background_review", None), "background review spawn raised", kwargs=dict(
             messages_snapshot=list(messages), review_memory=should_review_memory, review_skills=should_review_skills,
         ))
@@ -723,6 +725,25 @@ def _finish_codex_turn(agent, turn, messages: list[dict[str, Any]], *, original_
 
 
 def run_codex_app_server_turn(agent, *, user_message: str, original_user_message: Any, messages: list[dict[str, Any]],
+                              effective_task_id: str, should_review_memory: bool = False) -> dict[str, Any]:
+    api_calls = 0
+    while True:
+        result = _run_codex_app_server_once(
+            agent, user_message=user_message, original_user_message=original_user_message,
+            messages=messages, effective_task_id=effective_task_id, should_review_memory=should_review_memory,
+        )
+        api_calls += result["api_calls"]
+        result["api_calls"] = api_calls
+        if not result["completed"] or not claim_continuation(agent):
+            result["final_response"] = suppress_duplicate_aside(agent, result["final_response"])
+            return result
+        deliver_aside(agent, result["final_response"])
+        append_message(messages, {"role": "user", "content": CONTINUATION_NOTE})
+        agent._persist_session(messages)
+        user_message = CONTINUATION_NOTE
+
+
+def _run_codex_app_server_once(agent, *, user_message: str, original_user_message: Any, messages: list[dict[str, Any]],
                               effective_task_id: str, should_review_memory: bool = False) -> dict[str, Any]:
     """Hand the turn to a ``codex app-server`` subprocess and project its events into ``messages``.
     Returns the chat_completions result shape. The user message is ALREADY in ``messages`` — never append it again."""

@@ -19,6 +19,7 @@ from hermes_constants import (
     get_hermes_home, get_scratch_dir, get_skills_dir, is_wsl, reset_hermes_home_override, set_hermes_home_override,
 )
 
+from agent.aside_continuity import ASIDE_CONTEXT, mark_aside
 from agent.model_metadata import CHARS_PER_TOKEN
 from agent.runtime_cwd import resolve_agent_cwd
 from agent.skill_utils import (
@@ -580,17 +581,18 @@ CONTROL_FRAME_OPENERS = (
 
 def format_steer_marker(steer_text: str) -> str:
     """Wrap a mid-turn steer in the self-describing marker (see note above)."""
-    return f"\n\n{STEER_MARKER_OPEN}\n{steer_text}\n{STEER_MARKER_CLOSE}"
+    return f"\n\n{STEER_MARKER_OPEN}\n{ASIDE_CONTEXT}\n\n{steer_text}\n{STEER_MARKER_CLOSE}"
 
 
 STEER_DISPLAY_KIND = "steer"
 
 
-def steer_user_row(steer_text: str) -> dict[str, Any]:
+def steer_user_row(steer_text: str, *, agent=None) -> dict[str, Any]:
     """The standalone ``role:user`` row a mid-turn /steer is delivered as (after the newest tool
     result). Its own row — never smeared onto the already-persisted tool row, which append-only
     persistence would leave divergent from the live request — and typed so the alternation repair
     never merges the next real prompt into it and history renderers can label it."""
+    mark_aside(agent)
     return {"role": "user", "content": format_steer_marker(steer_text).lstrip(),
             "display_kind": STEER_DISPLAY_KIND}
 

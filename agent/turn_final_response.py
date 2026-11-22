@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import logging
 from typing import Any, Dict, Optional
 
+from agent.aside_continuity import continue_after_aside, suppress_duplicate_aside
 from agent.message_metadata import append_message
 from agent.reasoning_promotion import answer_in_reasoning_capability
 from agent.repetition_guard import STOP_PATH_MIN_CHARS, is_runaway_repetition
@@ -345,18 +346,13 @@ def finish_text_response(
     # assistant row as settled, so a transform after this write would reach the user but never
     # the stored/replayed transcript (#44239). finalize_turn reads the recorded outcome; like
     # there, an interrupted turn keeps the raw text.
-    from agent.turn_finalizer import apply_llm_output_transform
-    _transformed = False
-    if not getattr(agent, "_interrupt_requested", False):
-        final_response, _transformed, _ = apply_llm_output_transform(
-            agent, final_response, turn_id=getattr(agent, "_current_turn_id", "") or "", logger=logger,
-        )
-    if _transformed:
-        if _promoted:
-            final_msg["api_content"] = final_response
-        else:
-            final_msg["content"] = final_response
+    final_response = _transform_final_response(agent, final_response, final_msg, _promoted)
 
+    if continue_after_aside(agent, final_msg, final_response, messages, conversation_history):
+        final_response = None
+        return _verdict("continue")
+    final_response = suppress_duplicate_aside(agent, final_response)
+    final_msg["api_content" if _promoted else "content"] = final_response
     append_message(messages, final_msg)
     # Make the answer durable before leaving the loop (_DB_PERSISTED_MARKER keeps
     # _persist_session idempotent). Failure must NOT abort the turn: finalize retries.
@@ -374,3 +370,16 @@ def finish_text_response(
     if not agent.quiet_mode:
         agent._safe_print(f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)")
     return _verdict("break")
+
+
+def _transform_final_response(agent, final_response, final_msg, promoted):
+    from agent.turn_finalizer import apply_llm_output_transform
+
+    if getattr(agent, "_interrupt_requested", False):
+        return final_response
+    final_response, transformed, _ = apply_llm_output_transform(
+        agent, final_response, turn_id=getattr(agent, "_current_turn_id", "") or "", logger=logger,
+    )
+    if transformed:
+        final_msg["api_content" if promoted else "content"] = final_response
+    return final_response

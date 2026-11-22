@@ -8,6 +8,7 @@ import logging
 import threading
 from typing import Optional
 
+from agent.aside_continuity import ASIDE_CONTEXT, cancel_asides, mark_aside
 from agent.interrupt_compat import request_hard_interrupt
 from tools.interrupt import request_yield as _request_yield
 from tools.interrupt import set_interrupt as _set_interrupt
@@ -198,6 +199,7 @@ class InterruptControlMixin:
                 self._interrupt_message = message
                 self._tool_interrupt_reason = tool_interrupt_reason
             self._interrupt_requested = True
+            cancel_asides(self)
             self._turn_user_intervened = True
             # The turn record and the log must agree on WHO asked for the stop (#112647).
             logger.info("Interrupt requested (%s): %s", "hard" if hard_cancel else "soft", tool_interrupt_reason)
@@ -297,6 +299,7 @@ class InterruptControlMixin:
             _set_interrupt(False, self._execution_thread_id)
         _ic_signal_tool_workers(self, False)
         if hard_cancel:
+            cancel_asides(self)
             # Hard stop only (see docstring). The comment that used to run unconditionally here
             # claimed a hard interrupt supersedes the steer — but nothing gated this wipe on
             # hard_cancel, so a soft clear dropped a live user message with no trace.
@@ -314,6 +317,12 @@ class InterruptControlMixin:
         if not text or not text.strip():
             return False
         cleaned = text.strip()
+        if _ic_codex_method(self, "request_steer") is not None:
+            accepted = self.redirect(cleaned)
+            if accepted and ticket is not None:
+                with _ic_lock(self, "_pending_steer_lock"):
+                    _steer_fates(self)[ticket] = True
+            return accepted
         with _ic_lock(self, "_pending_steer_lock"):
             _set_steer_parts(self, _steer_parts(self) + [(ticket, cleaned)])
         # The turn no longer ran on its own (first-task-done detection reads this off the result).
@@ -335,9 +344,10 @@ class InterruptControlMixin:
                 if self._interrupt_requested:
                     return False
             try:
-                accepted = bool(_native_steer(cleaned))
+                accepted = bool(_native_steer(f"{ASIDE_CONTEXT}\n\n{cleaned}"))
                 if accepted:
                     self._turn_user_intervened = True
+                    mark_aside(self)
                 return accepted
             except Exception:
                 logger.debug("Codex app-server turn/steer failed", exc_info=True)
