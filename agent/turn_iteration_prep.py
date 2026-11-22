@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
 from agent.display import KawaiiSpinner
-from agent.interrupt_control import interrupt_issuer, interrupted_during_api_call_reason
+from agent.interrupt_control import interrupt_issuer, interrupted_during_api_call_reason, note_redirect_delivery
 from agent.turn_context_compaction import _reanchor
 from agent.turn_truncation import boosted_output_cap
 
@@ -347,12 +347,11 @@ class IterationStart:
     api_call_count: Any
     interrupted: Any
     _turn_exit_reason: Any
-    _redirect_resume_pending: bool = False
 
 
 def begin_iteration(
     agent: Any, *, messages: Any, conversation_history: Any, original_user_message: Any,
-    api_call_count: Any, interrupted: Any, _turn_exit_reason: Any, _redirect_resume_pending: bool = False,
+    api_call_count: Any, interrupted: Any, _turn_exit_reason: Any,
 ) -> IterationStart:
     """Iteration entry in the original order: apply a pending redirect, reset the checkpoint
     dedup, then the interrupt / review-budget / iteration-budget exits. ``api_call_count`` is
@@ -366,13 +365,12 @@ def begin_iteration(
             action=action, original_user_message=original_user_message,
             api_call_count=api_call_count, interrupted=interrupted,
             _turn_exit_reason=_turn_exit_reason,
-            _redirect_resume_pending=_redirect_resume_pending,
         )
 
     _redirect_text = agent._drain_pending_redirect()
     if _redirect_text:
         _apply_active_turn_redirect(agent, messages, _redirect_text)
-        _redirect_resume_pending = True
+        note_redirect_delivery(agent)
         if isinstance(original_user_message, str):
             original_user_message = (
                 f"{original_user_message}\n\n" f"User correction during the turn: {_redirect_text}"

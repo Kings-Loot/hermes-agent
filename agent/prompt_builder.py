@@ -592,9 +592,9 @@ def steer_user_row(steer_text: str, *, agent=None) -> dict[str, Any]:
     persistence would leave divergent from the live request — and typed so the alternation repair
     never merges the next real prompt into it and history renderers can label it."""
     if agent is not None:
-        from agent.interrupt_control import note_steer_delivery
+        from agent.interrupt_control import note_redirect_delivery
 
-        note_steer_delivery(agent, steer_text)
+        note_redirect_delivery(agent)
     return {"role": "user", "content": format_steer_marker(steer_text).lstrip(),
             "display_kind": STEER_DISPLAY_KIND}
 

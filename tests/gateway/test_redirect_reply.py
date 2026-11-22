@@ -135,6 +135,112 @@ async def test_standalone_redirect_answer_reaches_slack_before_original_task_fin
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("delivery", "codex"), [("redirect", True), ("steer", False)])
+@pytest.mark.parametrize("reply", ["answer", "silent", "stop", "callbackless", "fallback"])
+async def test_tool_batch_followup_gets_one_text_only_request(agent, slack_turn, delivery, codex, reply):
+    turn, adapter = slack_turn
+    turn._ctx._loop_for_step = asyncio.get_running_loop()
+    if codex:
+        agent.api_mode = "codex_responses"
+        agent.provider = "openai-codex"
+        agent.base_url = "https://chatgpt.com/backend-api/codex"
+        agent.model = "gpt-6.1-sol"
+    agent._cached_system_prompt = "You are helpful."
+    agent.compression_enabled = False
+    agent.save_trajectories = False
+    _, delta, interim, want_interim = turn._setup_stream_consumer("slack")
+    if reply != "callbackless":
+        turn._wire_turn_agent_callbacks(agent, {}, None, delta, interim, want_interim)
+    answer_sent = threading.Event()
+
+    def send(*args, **kwargs):
+        answer_sent.set()
+        return SimpleNamespace(success=True)
+
+    adapter.send.side_effect = send
+    requests = []
+    executed = []
+    answer = "Staging passed 391 tests."
+
+    def text_response(content):
+        if codex:
+            return SimpleNamespace(status="completed", output_text=content)
+        return test_run_agent._mock_response(content=content)
+
+    def tool_response(query):
+        arguments = f'{{"query":"{query}"}}'
+        if codex:
+            tc = SimpleNamespace(type="function_call", call_id=query, name="web_search", arguments=arguments)
+            return SimpleNamespace(status="completed", output=[tc])
+        tc = test_run_agent._mock_tool_call(name="web_search", arguments=arguments, call_id=query)
+        return test_run_agent._mock_response(content="", finish_reason="tool_calls", tool_calls=[tc])
+
+    def respond(api_kwargs):
+        requests.append(api_kwargs)
+        messages = api_kwargs["input" if codex else "messages"]
+        if len(requests) == 1:
+            return tool_response("before")
+        if len(requests) == 2 or (reply == "fallback" and len(requests) == 3):
+            assert "How many passed?" in str(messages[-1]["content"])
+            assert "Use staging." in str(messages[-1]["content"])
+            if reply == "stop":
+                agent.hard_interrupt()
+                raise InterruptedError("stop")
+            if reply == "fallback" and len(requests) == 2:
+                return None
+            if api_kwargs.get("tool_choice") == "none":
+                return text_response(answer if reply != "silent" else "[SILENT]")
+            return tool_response("after")
+        after_reply = 4 if reply == "fallback" else 3
+        if len(requests) == after_reply and messages[-1].get("role") == "user":
+            if reply in {"answer", "fallback"}:
+                assert answer_sent.wait(timeout=5)
+            return tool_response("after")
+        return text_response("Original report completed.")
+
+    def execute(_name, arguments, *args, **kwargs):
+        query = arguments["query"]
+        executed.append(query)
+        if query == "before":
+            submit = getattr(agent, delivery)
+            assert submit("How many passed?")
+            assert submit("Use staging.")
+        return "Original tool result."
+
+    with (
+        patch.object(agent, "_interruptible_api_call", side_effect=respond),
+        patch("model_tools.handle_function_call", side_effect=execute),
+        patch.object(agent, "_try_activate_fallback", return_value=reply == "fallback"),
+    ):
+        result = await asyncio.to_thread(agent.run_conversation, "Complete the original report.")
+
+    assert [call.args[1] for call in adapter.send.await_args_list] == (
+        [answer] if reply in {"answer", "fallback"} else []
+    )
+    if reply == "callbackless":
+        assert result["final_response"] == "Original report completed."
+    assert [i for i, request in enumerate(requests) if request.get("tool_choice") == "none"] == (
+        {"callbackless": [], "fallback": [1, 2]}.get(reply, [1])
+    )
+    assert all(request["tools"] == requests[0]["tools"] for request in requests)
+    if codex:
+        assert all(request["prompt_cache_key"] == requests[0]["prompt_cache_key"] for request in requests)
+        assert all(request["instructions"] == requests[0]["instructions"] for request in requests)
+    continuations = [
+        row for row in result["messages"]
+        if row.get("display_kind") == "hidden"
+        and str(row.get("api_content")).startswith("Continue the original task")
+    ]
+    assert len(continuations) == (0 if reply in {"stop", "callbackless"} else 1)
+    if reply == "stop":
+        assert result["interrupted"]
+        assert executed == ["before"]
+    else:
+        assert executed == ["before", "after"]
+        assert result["final_response"] == "Original report completed."
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("silent", [True, False])
 async def test_streamed_redirect_delivers_without_leaking_into_resumed_tool_preamble(agent, slack_turn, silent):
     turn, adapter = slack_turn

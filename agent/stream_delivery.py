@@ -179,6 +179,11 @@ class StreamDeliveryMixin:
                 self._delivered_interim_texts = set()
             self._delivered_interim_texts.add(normalized)
 
+    def _has_redirect_reply_sink(self) -> bool:
+        return any(callable(getattr(self, name, None)) for name in (
+            "redirect_reply_callback", "interim_assistant_callback", "stream_delta_callback", "_stream_callback",
+        ))
+
     def _emit_redirect_reply(self, visible: str, *, streamed_text: str | None = None) -> bool:
         if not visible or visible == "(empty)" or self._interrupt_requested:
             return False

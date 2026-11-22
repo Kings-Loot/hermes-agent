@@ -41,6 +41,7 @@ class ResponseCheckVerdict:
     _preflight_compression_blocked: Any
     _last_preflight_pressure: Any
     api_duration: Any
+    response_accepted: bool
     result: Optional[dict[str, Any]] = None
 
 
@@ -104,6 +105,8 @@ def check_api_response(
     reset only when the usage fold re-arms the compression budget."""
     from agent.turn_recovery import validate_response_shape
 
+    response_accepted = False
+
     def _verdict(action: str, result: Optional[dict[str, Any]] = None) -> ResponseCheckVerdict:
         return ResponseCheckVerdict(
             action=action, thinking_spinner=thinking_spinner, messages=messages,
@@ -114,7 +117,7 @@ def check_api_response(
             truncated_tool_call_retries=truncated_tool_call_retries,
             _preflight_compression_blocked=_preflight_compression_blocked,
             _last_preflight_pressure=_last_preflight_pressure, api_duration=api_duration,
-            result=result,
+            response_accepted=response_accepted, result=result,
         )
 
     api_duration = time.time() - api_start_time
@@ -171,6 +174,7 @@ def check_api_response(
         compression_attempts = 0
         return _verdict("break")
 
+    response_accepted = True
     if finish_reason == "length":
         previous_part_count = len(truncated_response_parts)
         if not previous_part_count:
