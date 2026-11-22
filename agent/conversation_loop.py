@@ -1580,7 +1580,7 @@ def _run_api_retry_loop(agent, s: _LoopState) -> Optional[dict[str, Any]]:
     Returns a turn result dict when a phase ends the turn, else None once the loop is left
     (success, a restart armed on ``s._retry``, interrupt, or retries exhausted)."""
     delivered_redirects = getattr(agent, "_delivered_redirects", 0)
-    text_only = delivered_redirects != s._requested_redirects
+    text_only = delivered_redirects != s._requested_redirects and agent._has_redirect_reply_sink()
     while s.retry_count < s.max_retries:
         _ng = _run_phase(nous_rate_limit_guard, agent, s)
         if _ng.action == "return":

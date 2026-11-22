@@ -136,7 +136,7 @@ async def test_standalone_redirect_answer_reaches_slack_before_original_task_fin
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("delivery", "codex"), [("redirect", True), ("steer", False)])
-@pytest.mark.parametrize("reply", ["answer", "silent", "stop"])
+@pytest.mark.parametrize("reply", ["answer", "silent", "stop", "callbackless"])
 async def test_tool_batch_followup_gets_one_text_only_request(agent, slack_turn, delivery, codex, reply):
     turn, adapter = slack_turn
     turn._ctx._loop_for_step = asyncio.get_running_loop()
@@ -149,7 +149,8 @@ async def test_tool_batch_followup_gets_one_text_only_request(agent, slack_turn,
     agent.compression_enabled = False
     agent.save_trajectories = False
     _, delta, interim, want_interim = turn._setup_stream_consumer("slack")
-    turn._wire_turn_agent_callbacks(agent, {}, None, delta, interim, want_interim)
+    if reply != "callbackless":
+        turn._wire_turn_agent_callbacks(agent, {}, None, delta, interim, want_interim)
     answer_sent = threading.Event()
 
     def send(*args, **kwargs):
@@ -186,7 +187,7 @@ async def test_tool_batch_followup_gets_one_text_only_request(agent, slack_turn,
                 agent.hard_interrupt()
                 raise InterruptedError("stop")
             if api_kwargs.get("tool_choice") == "none":
-                return text_response(answer if reply == "answer" else "[SILENT]")
+                return text_response(answer if reply != "silent" else "[SILENT]")
             return tool_response("after")
         if len(requests) == 3 and messages[-1].get("role") == "user":
             if reply == "answer":
@@ -210,7 +211,11 @@ async def test_tool_batch_followup_gets_one_text_only_request(agent, slack_turn,
         result = await asyncio.to_thread(agent.run_conversation, "Complete the original report.")
 
     assert [call.args[1] for call in adapter.send.await_args_list] == ([answer] if reply == "answer" else [])
-    assert [i for i, request in enumerate(requests) if request.get("tool_choice") == "none"] == [1]
+    if reply == "callbackless":
+        assert result["final_response"] == "Original report completed."
+    assert [i for i, request in enumerate(requests) if request.get("tool_choice") == "none"] == (
+        [] if reply == "callbackless" else [1]
+    )
     assert all(request["tools"] == requests[0]["tools"] for request in requests)
     if codex:
         assert all(request["prompt_cache_key"] == requests[0]["prompt_cache_key"] for request in requests)
@@ -220,7 +225,7 @@ async def test_tool_batch_followup_gets_one_text_only_request(agent, slack_turn,
         if row.get("display_kind") == "hidden"
         and str(row.get("api_content")).startswith("Continue the original task")
     ]
-    assert len(continuations) == (0 if reply == "stop" else 1)
+    assert len(continuations) == (0 if reply in {"stop", "callbackless"} else 1)
     if reply == "stop":
         assert result["interrupted"]
         assert executed == ["before"]
