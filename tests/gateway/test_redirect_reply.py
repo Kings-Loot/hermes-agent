@@ -6,10 +6,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from gateway.config import Platform
+from gateway.config import Platform, StreamingConfig
 from gateway.run import GatewayRunner
 from gateway.response_filters import is_intentional_silence_response
 from gateway.run_turn_runner import TurnRunner
+from gateway.stream_consumer import StreamConsumerConfig
 from tests.agent import test_run_agent
 
 agent = test_run_agent.agent
@@ -119,3 +120,56 @@ async def test_standalone_redirect_answer_reaches_slack_before_original_task_fin
         assert result["final_response"] == "Original report completed."
     assert len(requests) == (3 if case in {"finished", "stop"} else 4)
     assert tool_calls == {"question": ["original report"], "correction": ["staging"]}.get(case, [])
+
+
+@pytest.mark.asyncio
+async def test_streamed_silent_redirect_does_not_leak_into_resumed_tool_preamble(agent, slack_turn):
+    turn, adapter = slack_turn
+    turn._runner.config = SimpleNamespace(streaming=StreamingConfig(enabled=True))
+    turn._runner._build_stream_consumer_config = lambda *a, **kw: (StreamConsumerConfig(buffer_only=True), None)
+    turn._ctx.resolve_display_setting = lambda *a: None
+    turn._ctx._loop_for_step = asyncio.get_running_loop()
+    turn._ctx.progress_queue = None
+    turn._ctx.event_message_id = None
+    adapter.send.return_value = SimpleNamespace(success=True, message_id="message")
+    adapter.edit_message = AsyncMock(return_value=adapter.send.return_value)
+    agent._cached_system_prompt = "You are helpful."
+    agent.compression_enabled = False
+    agent.save_trajectories = False
+    consumer, delta, interim, want_interim = turn._setup_stream_consumer("slack")
+    turn._wire_turn_agent_callbacks(agent, {}, None, delta, interim, want_interim)
+    calls = []
+    tc = test_run_agent._mock_tool_call(name="web_search", arguments="{}", call_id="original-tool")
+
+    def respond(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            assert agent.redirect("Devin, check deployment.")
+            raise InterruptedError("redirect")
+        if len(calls) == 2:
+            agent._fire_stream_delta("[SILENT]")
+            return test_run_agent._mock_response(content="[SILENT]")
+        if len(calls) == 3:
+            agent._fire_stream_delta("Checking the report.")
+            return test_run_agent._mock_response(
+                content="Checking the report.", finish_reason="tool_calls", tool_calls=[tc],
+            )
+        return test_run_agent._mock_response(content="Original report completed.")
+
+    stream_task = asyncio.create_task(consumer.run())
+    try:
+        with (
+            patch.object(agent, "_interruptible_streaming_api_call", side_effect=respond),
+            patch("model_tools.handle_function_call", return_value="original tool result") as tool,
+        ):
+            result = await asyncio.to_thread(agent.run_conversation, "Complete the original report.")
+        tool.assert_called_once()
+    finally:
+        consumer.finish()
+        await asyncio.wait_for(stream_task, timeout=5)
+
+    assert result["final_response"] == "Original report completed."
+    adapter.send.assert_awaited()
+    payloads = repr([*adapter.send.await_args_list, *adapter.edit_message.await_args_list])
+    assert "Checking the report." in payloads
+    assert "[SILENT]" not in payloads

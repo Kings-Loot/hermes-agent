@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+from contextlib import suppress
 from typing import Any, Dict, Optional
 
 from agent.message_content import flatten_message_text
@@ -90,6 +91,9 @@ def resume_redirect(agent, state) -> bool:
     state.final_response = None
     if silent:
         reply.update(content="", api_content=visible, display_kind="hidden")
+        if agent.stream_delta_callback:
+            with suppress(Exception):
+                agent.stream_delta_callback(None)
     append_message(state.messages, reply)
     if not agent._interrupt_requested:
         append_message(state.messages, {
