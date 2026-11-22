@@ -169,3 +169,35 @@ def test_truncated_redirect_reply_does_not_leak_into_original_final(agent):
     assert (sent, result["final_response"]) == (
         ["I am using staging.\nIt has the expected tables."], "Original report completed.",
     )
+
+
+@pytest.mark.parametrize("with_interim", [False, True])
+def test_streamed_length_continued_redirect_is_delivered_once(agent, with_interim):
+    first, last = "I am using staging. ", "It has the expected tables."
+    deltas, resent, requests = [], [], []
+    agent.stream_delta_callback = deltas.append
+    if with_interim:
+        def interim(text, *, already_streamed):
+            if not already_streamed:
+                resent.append(text)
+
+        agent.interim_assistant_callback = interim
+
+    def respond(api_kwargs, **_):
+        requests.append(api_kwargs["messages"])
+        if len(requests) == 1:
+            assert agent.redirect("Which schema are you using?")
+            raise InterruptedError("redirect")
+        if len(requests) == 2:
+            agent._fire_stream_delta(first)
+            return test_run_agent._mock_response(content=first, finish_reason="length")
+        if len(requests) == 3:
+            agent._fire_stream_delta(last)
+            return test_run_agent._mock_response(content=last)
+        return test_run_agent._mock_response(content="Original report completed.")
+
+    with patch.object(agent, "_interruptible_streaming_api_call", side_effect=respond):
+        result = agent.run_conversation("Complete the original report.")
+
+    assert "".join(deltas).strip() == first + last
+    assert (len(requests), resent, result["final_response"]) == (4, [], "Original report completed.")

@@ -294,7 +294,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                     # stitched as a "partial delivery" nobody received (classic -q parity).
                     raise _NoStreamConsumer()
 
-        def interim_assistant_cb(text: str, *, already_streamed: bool = False, redirect_reply: bool = False):
+        def interim_assistant_cb(text: str, *, already_streamed: bool = False, redirect_reply: bool = False,
+                                 streamed_text: str | None = None):
             if not ctx._run_still_current():
                 return False
             if redirect_reply and not local_viewer_route:
@@ -319,7 +320,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             if stream_consumer is not None:
                 stream_consumer.on_segment_break() if already_streamed else stream_consumer.on_commentary(text)
                 if redirect_reply:
-                    return stream_consumer.flush_pending_sync() and stream_consumer.has_durably_delivered_text(text)
+                    delivered_text = streamed_text if already_streamed and streamed_text is not None else text
+                    return stream_consumer.flush_pending_sync() and stream_consumer.has_durably_delivered_text(delivered_text)
             elif redirect_reply and not local_viewer_route:
                 return self._deliver_unstreamed_redirect_reply(text)
             elif not already_streamed and ctx._status_adapter and str(text or "").strip():

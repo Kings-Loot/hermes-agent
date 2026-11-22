@@ -6,6 +6,7 @@ Extracted from ``run_agent.py``; every method resolves through ``AIAgent``'s MRO
 import logging
 import re
 import threading
+from functools import partial
 from typing import Any, Dict, List
 
 from agent.memory_context import sanitize_context
@@ -121,6 +122,11 @@ class StreamDeliveryMixin:
         visible, streamed = self._interim_visible_and_streamed(content)
         return bool(visible) and visible == streamed
 
+    def _fully_streamed_text(self, content: str) -> str | None:
+        if self._interim_content_fully_streamed(content):
+            return self._current_streamed_assistant_text
+        return None
+
     def _extract_codex_interim_visible_parts(self, assistant_msg: dict[str, Any]) -> list[str]:
         """Visible Codex commentary (``phase=commentary`` items), one string per message item.
 
@@ -173,11 +179,14 @@ class StreamDeliveryMixin:
                 self._delivered_interim_texts = set()
             self._delivered_interim_texts.add(normalized)
 
-    def _emit_redirect_reply(self, visible: str) -> bool:
+    def _emit_redirect_reply(self, visible: str, *, streamed_text: str | None = None) -> bool:
         if not visible or visible == "(empty)" or self._interrupt_requested:
             return False
-        cb = getattr(self, "redirect_reply_callback", None) or getattr(self, "interim_assistant_callback", None)
-        already_streamed = self._interim_content_fully_streamed(visible)
+        redirect_cb = getattr(self, "redirect_reply_callback", None)
+        cb = redirect_cb or getattr(self, "interim_assistant_callback", None)
+        already_streamed = streamed_text is not None
+        if redirect_cb is not None and already_streamed:
+            cb = partial(redirect_cb, streamed_text=streamed_text)
         delivered = already_streamed if cb is None else self._deliver_interim(
             visible, already_streamed=already_streamed, record=[visible], callback=cb,
         )

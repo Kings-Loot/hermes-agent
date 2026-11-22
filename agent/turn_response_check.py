@@ -94,6 +94,7 @@ def check_api_response(
     api_messages: Any, api_kwargs: Any, active_system_prompt: Any, conversation_history: Any,
     finish_reason: Any, retry_count: Any, max_retries: Any, compression_attempts: Any,
     max_compression_attempts: Any, length_continue_retries: Any, truncated_response_parts: Any,
+    truncated_streamed_parts: list[str | None],
     truncated_tool_call_retries: Any, current_turn_user_idx: Any, api_call_count: Any,
     api_request_id: Any, api_start_time: Any, effective_task_id: Any, turn_id: Any,
     _preflight_compression_blocked: Any, _last_preflight_pressure: Any,
@@ -171,6 +172,9 @@ def check_api_response(
         return _verdict("break")
 
     if finish_reason == "length":
+        previous_part_count = len(truncated_response_parts)
+        if not previous_part_count:
+            truncated_streamed_parts.clear()
         _tv = recover_from_truncation(
             agent, response, finish_reason, _retry, messages=messages,
             conversation_history=conversation_history, api_kwargs=api_kwargs,
@@ -184,6 +188,11 @@ def check_api_response(
         messages = _tv.messages
         length_continue_retries = _tv.length_continue_retries
         truncated_response_parts = _tv.truncated_response_parts
+        if len(truncated_response_parts) > previous_part_count:
+            content, _ = truncated_response_parts[-1]
+            truncated_streamed_parts.append(agent._fully_streamed_text(content))
+        elif not truncated_response_parts:
+            truncated_streamed_parts.clear()
         truncated_tool_call_retries = _tv.truncated_tool_call_retries
         retry_count = _tv.retry_count
         compression_attempts = _tv.compression_attempts

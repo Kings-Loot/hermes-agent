@@ -123,7 +123,8 @@ async def test_standalone_redirect_answer_reaches_slack_before_original_task_fin
 
 
 @pytest.mark.asyncio
-async def test_streamed_silent_redirect_does_not_leak_into_resumed_tool_preamble(agent, slack_turn):
+@pytest.mark.parametrize("silent", [True, False])
+async def test_streamed_redirect_delivers_without_leaking_into_resumed_tool_preamble(agent, slack_turn, silent):
     turn, adapter = slack_turn
     turn._runner.config = SimpleNamespace(streaming=StreamingConfig(enabled=True))
     turn._runner._build_stream_consumer_config = lambda *a, **kw: (StreamConsumerConfig(buffer_only=True), None)
@@ -147,9 +148,14 @@ async def test_streamed_silent_redirect_does_not_leak_into_resumed_tool_preamble
             assert agent.redirect("Devin, check deployment.")
             raise InterruptedError("redirect")
         if len(calls) == 2:
-            agent._fire_stream_delta("[SILENT]")
-            return test_run_agent._mock_response(content="[SILENT]")
-        if len(calls) == 3:
+            first = "[SILENT]" if silent else "I am using staging."
+            agent._fire_stream_delta(first)
+            return test_run_agent._mock_response(content=first, finish_reason="stop" if silent else "length")
+        if not silent and len(calls) == 3:
+            last = "It has the expected tables."
+            agent._fire_stream_delta(last)
+            return test_run_agent._mock_response(content=last)
+        if len(calls) == (3 if silent else 4):
             agent._fire_stream_delta("Checking the report.")
             return test_run_agent._mock_response(
                 content="Checking the report.", finish_reason="tool_calls", tool_calls=[tc],
@@ -173,3 +179,6 @@ async def test_streamed_silent_redirect_does_not_leak_into_resumed_tool_preamble
     payloads = repr([*adapter.send.await_args_list, *adapter.edit_message.await_args_list])
     assert "Checking the report." in payloads
     assert "[SILENT]" not in payloads
+    if not silent:
+        assert payloads.count("I am using staging.") == 1
+        assert payloads.count("It has the expected tables.") == 1

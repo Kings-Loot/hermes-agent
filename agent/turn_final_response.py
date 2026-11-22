@@ -73,19 +73,25 @@ def resume_redirect(agent, state) -> bool:
     if not pending or state.finish_reason != "stop" or agent._interrupt_requested:
         return False
     reply = agent._build_assistant_message(state.assistant_message, state.finish_reason)
-    visible = agent._strip_think_blocks(flatten_message_text(reply.get("content"))).strip()
+    content = flatten_message_text(reply.get("content"))
+    streamed_text = agent._fully_streamed_text(content)
     if state.truncated_response_parts:
         from agent.conversation_loop import _join_truncated_parts
 
-        visible = agent._strip_think_blocks(_join_truncated_parts([
-            *state.truncated_response_parts, (flatten_message_text(reply.get("content")), False),
-        ])).strip()
+        content = _join_truncated_parts([*state.truncated_response_parts, (content, False)])
+        streamed_parts = state.truncated_streamed_parts
+        if streamed_text and len(streamed_parts) == len(state.truncated_response_parts) and all(streamed_parts):
+            streamed_text = "".join([*streamed_parts, streamed_text])
+        else:
+            streamed_text = None
+    visible = agent._strip_think_blocks(content).strip()
     silent = is_intentional_silence_response(visible)
-    if not silent and not agent._emit_redirect_reply(visible):
+    if not silent and not agent._emit_redirect_reply(visible, streamed_text=streamed_text):
         return False
     if state.truncated_response_parts:
         _clear_truncation_markers(state.messages)
         state.truncated_response_parts = []
+        state.truncated_streamed_parts.clear()
         state.length_continue_retries = 0
     consume_redirect_reply(agent, state)
     state.final_response = None
