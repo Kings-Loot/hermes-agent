@@ -1489,6 +1489,7 @@ class _LoopState:
     interrupted: bool = False
     failed: bool = False
     _redirect_resume_pending: bool = False
+    _resumed_tool_redirects: int = 0
     codex_ack_continuations: int = 0
     length_continue_retries: int = 0
     # Backstop for the refunding restarts (redirect / rebuilt-for-fallback). Unlike
@@ -1713,6 +1714,7 @@ def _run_conversation_turn(
     s = _LoopState(
         system_message=system_message, moa_config=moa_config,
         max_compression_attempts=getattr(agent, "max_compression_attempts", 3),
+        _resumed_tool_redirects=getattr(agent, "_delivered_tool_redirects", 0),
         **{f.name: getattr(_ctx, f.name.lstrip("_")) for f in fields(_LoopState) if f.name in _CTX_FIELDS},
     )
     # Opt-in runtime: api_mode == codex_app_server hands the whole turn to the codex

@@ -18,7 +18,6 @@ import os
 import time
 from agent.i18n import DEFAULT_LANGUAGE, t
 from agent.session_activity import format_iteration_progress
-from gateway.busy_interjection import route_busy_interjection
 from gateway.busy_media import prepare_redirect_text
 from gateway.config import Platform
 from gateway.platforms.base import EphemeralReply
@@ -574,18 +573,13 @@ class GatewayBusySessionMixin:
             return reply_anchor if event.source.chat_type == "dm" else None
         return None if getattr(event, "internal", False) else event.message_id
 
-    async def _send_busy_reply(
-        self, event: MessageEvent, adapter, content: str, *, plain_anchor: bool = False, interim: bool = False,
-    ) -> None:
+    async def _send_busy_reply(self, event: MessageEvent, adapter, content: str, *, plain_anchor: bool = False) -> None:
         """Send a busy-path reply anchored to the event (thread metadata included)."""
         reply_anchor = self._reply_anchor_for_event(event)
-        metadata = self._thread_metadata_for_source(event.source, reply_anchor)
-        if interim:
-            metadata = {**(metadata or {}), "_interim_send": True}
         await adapter._send_with_retry(
             chat_id=event.source.chat_id, content=content,
             reply_to=reply_anchor if plain_anchor else self._busy_reply_to(event, reply_anchor),
-            metadata=metadata,
+            metadata=self._thread_metadata_for_source(event.source, reply_anchor),
         )
 
     async def _send_busy_drain_notice(self, event: MessageEvent, session_key: str, effective_mode: str) -> None:
@@ -669,8 +663,8 @@ class GatewayBusySessionMixin:
 
     async def _resolve_busy_steer_or_redirect(
         self, event: MessageEvent, session_key: str, effective_mode: str, running_agent: Any
-    ) -> GatewayRunner._BusySteerOutcome | None:
-        """Apply interrupt demotions and steer or redirect. None means the interjection is settled."""
+    ) -> GatewayRunner._BusySteerOutcome:
+        """Apply interrupt->queue demotions, then attempt steer (steer mode) or redirect (interrupt mode)."""
         from gateway.run import _AGENT_PENDING_SENTINEL
         # Steer injects mid-run via running_agent.steer(), falling back to queue (nothing lost) when
         # the agent isn't running yet, lacks steer(), or the payload is empty. Interrupt is demoted
@@ -687,14 +681,6 @@ class GatewayBusySessionMixin:
             effective_mode = self._demote_interrupt(session_key, "context compression is in flight (#56391)")
         steered = redirected = False
         agent_live = running_agent is not None and running_agent is not _AGENT_PENDING_SENTINEL
-        interjection = (
-            await route_busy_interjection(self, event, session_key, running_agent)
-            if effective_mode == "interrupt" and agent_live else None
-        )
-        if interjection == "handled":
-            return None
-        elif interjection == "queue":
-            effective_mode = "queue"
         plain_text = (
             event.message_type == MessageType.TEXT and not event.media_urls and not event.media_types
         )
@@ -722,22 +708,10 @@ class GatewayBusySessionMixin:
             and hasattr(running_agent, "redirect")
         ):
             redirect_text = await prepare_redirect_text(self, event)
-            if interjection == "apply":
-                redirect_text = self._busy_followup_text(redirect_text)
             redirected = self._redirect_active_turn(running_agent, redirect_text, session_key, event)
-            if interjection == "apply" and not redirected:
-                effective_mode = "queue"
         return self._BusySteerOutcome(
             effective_mode=effective_mode, demoted_for_subagents=demoted_for_subagents,
             demoted_for_compression=demoted_for_compression, steered=steered, redirected=redirected,
-        )
-
-    @staticmethod
-    def _busy_followup_text(text: str) -> str:
-        return (
-            "Handle this follow-up, then continue the original task from the progress already made. "
-            "Do not repeat finished work or relaunch running tools.\n\n"
-            f"{text}"
         )
 
     @staticmethod
@@ -906,14 +880,9 @@ class GatewayBusySessionMixin:
             logger.debug("Failed to apply busy-input onboarding hint: %s", _onb_err)
         return message
 
-    async def _send_busy_ack_reply(
-        self, event: MessageEvent, adapter, message: str, *, interim: bool = False,
-    ) -> None:
+    async def _send_busy_ack_reply(self, event: MessageEvent, adapter, message: str) -> None:
         try:
-            if interim:
-                await self._send_busy_reply(event, adapter, message, interim=True)
-            else:
-                await self._send_busy_reply(event, adapter, message)
+            await self._send_busy_reply(event, adapter, message)
         except Exception as e:
             logger.debug("Failed to send busy-ack: %s", e)
 
@@ -974,8 +943,6 @@ class GatewayBusySessionMixin:
         _busy_state = self._peek_session_state(session_key)
         running_agent = _busy_state.turn.agent if _busy_state else None
         _steer = await self._resolve_busy_steer_or_redirect(event, session_key, effective_mode, running_agent)
-        if _steer is None:
-            return True
         # Queue as the next turn — skipped after a successful steer/redirect (the text is already in
         # the run and must NOT replay). FIFO gives each text its own turn (raw merge would join them).
         if not _steer.steered and not _steer.redirected:

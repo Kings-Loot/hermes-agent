@@ -55,13 +55,16 @@ class FinalResponseVerdict:
 
 
 def resume_silent_redirect(agent, state) -> bool:
+    delivered_tool_redirects = getattr(agent, "_delivered_tool_redirects", 0)
+    pending = state._redirect_resume_pending or state._resumed_tool_redirects != delivered_tool_redirects
     if (
-        not state._redirect_resume_pending or state.finish_reason != "stop"
+        not pending or state.finish_reason != "stop"
         or not is_intentional_silence_response(state.assistant_message.content)
         or agent._interrupt_requested
     ):
         return False
     state._redirect_resume_pending = False
+    state._resumed_tool_redirects = delivered_tool_redirects
     state.final_response = None
     append_message(state.messages, {
         "role": "assistant", "content": "",

@@ -108,3 +108,28 @@ async def test_busy_voice_note_interrupts_with_transcript_in_interrupt_mode(tmp_
         assert sent, 'no busy ack'
     finally:
         authority.db.close()
+
+
+@pytest.mark.asyncio
+async def test_two_accepted_busy_redirects_never_create_new_admissions(tmp_path, monkeypatch):
+    runner, authority, source, agent, sent, turn = await _setup(tmp_path, monkeypatch, 'interrupt')
+    redirects = []
+
+    def redirect(text):
+        redirects.append(text)
+        return True
+
+    agent._supports_active_turn_redirect = True
+    agent.redirect = redirect
+    opener = turn.event
+    try:
+        await asyncio.wait_for(asyncio.gather(*(runner._handle_message(MessageEvent(
+            text=f'Correction {index}', source=source, message_id=f'followup-{index}',
+        )) for index in range(2))), timeout=10)
+        assert [text.rsplit(' ', 1)[-1] for text in redirects] == ['0', '1']
+        assert len(sent) == 1  # Existing debounce shares a busy ack across both follow-ups.
+        assert _admitted(authority) == []
+        assert turn.agent is agent and turn.event is opener
+        assert agent.interrupts == []
+    finally:
+        authority.db.close()

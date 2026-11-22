@@ -24,6 +24,7 @@ _REASON_USER_INTERRUPT = "user interrupt"
 USER_INTERRUPT_REASONS = frozenset({_REASON_HARD_STOP, _REASON_NEW_MESSAGE, _REASON_USER_INTERRUPT})
 # ``tool_reason`` the gateway's restart/shutdown stop passes (gateway.run._INTERRUPT_TOOL_REASON_GATEWAY_SHUTDOWN).
 _REASON_GATEWAY_SHUTDOWN = "gateway shutdown"
+_TOOL_REDIRECT = object()
 
 
 def interrupt_issuer(agent) -> Optional[str]:
@@ -106,6 +107,16 @@ def _steer_fates(agent) -> dict:
     """``{ticket: consumed}`` for ticketed steers that left the buffer: True when a drain handed the text
     to the turn, False when it was dropped unread. ``withdraw_steer`` reads each one once."""
     return vars(agent).setdefault("_steer_ticket_fates", {})
+
+
+def _is_steer_transfer(ticket) -> bool:
+    return ticket is not None and ticket is not _TOOL_REDIRECT
+
+
+def note_steer_delivery(agent, steer_text: str) -> None:
+    drained, parts = vars(agent).get("_steer_last_drain", (None, ()))
+    if drained == steer_text and any(ticket is _TOOL_REDIRECT for ticket, _ in parts):
+        agent._delivered_tool_redirects = getattr(agent, "_delivered_tool_redirects", 0) + 1
 
 
 def requeue_drained_steer(agent, steer_text: str) -> None:
@@ -302,7 +313,7 @@ class InterruptControlMixin:
             # hard_cancel, so a soft clear dropped a live user message with no trace.
             with _ic_lock(self, "_pending_steer_lock"):
                 for ticket, _ in _steer_parts(self):
-                    if ticket is not None:
+                    if _is_steer_transfer(ticket):
                         _steer_fates(self)[ticket] = False
                 _set_steer_parts(self, [])
         return True
@@ -348,7 +359,7 @@ class InterruptControlMixin:
         # `sleep` poller, a build), so ask the tool workers to YIELD: terminal hands the live
         # process to the background registry and returns; tools that don't yield are unaffected.
         if getattr(self, "_executing_tools", False):
-            accepted = self.steer(cleaned)
+            accepted = self.steer(cleaned, ticket=_TOOL_REDIRECT)
             if accepted:
                 tracker = getattr(self, "_tool_worker_threads", None)
                 tracker_lock = getattr(self, "_tool_worker_threads_lock", None)
@@ -402,7 +413,7 @@ class InterruptControlMixin:
             parts = _steer_parts(self)
             _set_steer_parts(self, [])
             for ticket, _ in parts:
-                if ticket is not None:
+                if _is_steer_transfer(ticket):
                     _steer_fates(self)[ticket] = True
             self._steer_last_drain = (text, parts)  # requeue_drained_steer restores its tickets
         return text
@@ -413,8 +424,8 @@ class InterruptControlMixin:
         settlement withdraws it and its admission goes back to its own queue place."""
         with _ic_lock(self, "_pending_steer_lock"):
             parts = _steer_parts(self)
-            _set_steer_parts(self, [part for part in parts if part[0] is not None])
-        return "\n".join(text for ticket, text in parts if ticket is None) or None
+            _set_steer_parts(self, [part for part in parts if _is_steer_transfer(part[0])])
+        return "\n".join(text for ticket, text in parts if not _is_steer_transfer(ticket)) or None
 
     def withdraw_steer(self, ticket) -> bool:
         """Settle one ``steer(text, ticket=...)`` by identity (the gateway's transfer of a queued prompt):
