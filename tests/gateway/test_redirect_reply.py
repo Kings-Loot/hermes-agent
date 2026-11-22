@@ -136,7 +136,7 @@ async def test_standalone_redirect_answer_reaches_slack_before_original_task_fin
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("delivery", "codex"), [("redirect", True), ("steer", False)])
-@pytest.mark.parametrize("reply", ["answer", "silent", "stop", "callbackless"])
+@pytest.mark.parametrize("reply", ["answer", "silent", "stop", "callbackless", "fallback"])
 async def test_tool_batch_followup_gets_one_text_only_request(agent, slack_turn, delivery, codex, reply):
     turn, adapter = slack_turn
     turn._ctx._loop_for_step = asyncio.get_running_loop()
@@ -180,17 +180,20 @@ async def test_tool_batch_followup_gets_one_text_only_request(agent, slack_turn,
         messages = api_kwargs["input" if codex else "messages"]
         if len(requests) == 1:
             return tool_response("before")
-        if len(requests) == 2:
+        if len(requests) == 2 or (reply == "fallback" and len(requests) == 3):
             assert "How many passed?" in str(messages[-1]["content"])
             assert "Use staging." in str(messages[-1]["content"])
             if reply == "stop":
                 agent.hard_interrupt()
                 raise InterruptedError("stop")
+            if reply == "fallback" and len(requests) == 2:
+                return None
             if api_kwargs.get("tool_choice") == "none":
                 return text_response(answer if reply != "silent" else "[SILENT]")
             return tool_response("after")
-        if len(requests) == 3 and messages[-1].get("role") == "user":
-            if reply == "answer":
+        after_reply = 4 if reply == "fallback" else 3
+        if len(requests) == after_reply and messages[-1].get("role") == "user":
+            if reply in {"answer", "fallback"}:
                 assert answer_sent.wait(timeout=5)
             return tool_response("after")
         return text_response("Original report completed.")
@@ -207,14 +210,17 @@ async def test_tool_batch_followup_gets_one_text_only_request(agent, slack_turn,
     with (
         patch.object(agent, "_interruptible_api_call", side_effect=respond),
         patch("model_tools.handle_function_call", side_effect=execute),
+        patch.object(agent, "_try_activate_fallback", return_value=reply == "fallback"),
     ):
         result = await asyncio.to_thread(agent.run_conversation, "Complete the original report.")
 
-    assert [call.args[1] for call in adapter.send.await_args_list] == ([answer] if reply == "answer" else [])
+    assert [call.args[1] for call in adapter.send.await_args_list] == (
+        [answer] if reply in {"answer", "fallback"} else []
+    )
     if reply == "callbackless":
         assert result["final_response"] == "Original report completed."
     assert [i for i, request in enumerate(requests) if request.get("tool_choice") == "none"] == (
-        [] if reply == "callbackless" else [1]
+        {"callbackless": [], "fallback": [1, 2]}.get(reply, [1])
     )
     assert all(request["tools"] == requests[0]["tools"] for request in requests)
     if codex:

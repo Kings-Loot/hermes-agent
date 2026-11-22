@@ -1590,10 +1590,11 @@ def _run_api_retry_loop(agent, s: _LoopState) -> Optional[dict[str, Any]]:
         try:
             _run_phase(build_api_request, agent, s, text_only=text_only)
             call = _run_phase(perform_api_call, agent, s)
-            s._requested_redirects = delivered_redirects
             if call.action == "break":
                 return None
             _rc = _run_phase(check_api_response, agent, s)
+            if _rc.response_accepted:
+                s._requested_redirects = delivered_redirects
             if _rc.action == "return":
                 return _rc.result
             if _rc.action == "break":
